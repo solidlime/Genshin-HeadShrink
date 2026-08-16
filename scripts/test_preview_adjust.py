@@ -667,6 +667,24 @@ class AllVertsTransformTest(unittest.TestCase):
         self.assertTrue(hs.is_body_mesh(big, [big]))  # sole mesh is the body
         self.assertTrue(hs.is_body_mesh(big, [big, _Ob(100)]))  # tie -> body
 
+    def test_all_verts_rule_face_full_body_box(self):
+        # 新仕様: 顔メッシュは常に全頂点変形 (all_verts=True)、body は box 内
+        # のみ。all_verts 判定 = not is_body_mesh で face_full_transform の
+        # 値に依存しない (フラグは廃止済み)。
+        class _Data:
+            def __init__(self, n):
+                self.vertices = [None] * n
+
+        class _Ob:
+            def __init__(self, n):
+                self.data = _Data(n)
+
+        big = _Ob(100)
+        small = _Ob(10)
+        meshes = [big, small]
+        self.assertFalse(not hs.is_body_mesh(big, meshes))    # body -> box のみ
+        self.assertTrue(not hs.is_body_mesh(small, meshes))   # 顔 -> 全頂点変形
+
 
 class BoxWireframeTest(unittest.TestCase):
     def test_verts_eight_corners(self):

@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 7, 2),
+    "version": (1, 7, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -795,13 +795,12 @@ def _preview_props_update(self, context):
     scale = self.shrink_scale
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
-    full = self.face_full_transform
     origin = tuple(self.shrink_center)  # 縮小中心は box 中央に固定
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         preview_shrink_mesh(obj.data, center, half, scale,
                             tuple(obj.location), falloff, shift,
-                            full and not is_body_mesh(obj, meshes), origin)
+                            not is_body_mesh(obj, meshes), origin)
     _apply_eye_sink(coll, self.eye_sink, self.eye_sink_pad,
                     self.eye_region_min, self.eye_region_max)
     _sync_shrink_box(center, half)
@@ -1630,14 +1629,13 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         scale = props.shrink_scale
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
-        full = props.face_full_transform
         origin = tuple(props.shrink_center)  # 縮小中心は box 中央に固定
         meshes = [o for o in coll.objects if o.type == 'MESH']
         count = 0
         for obj in meshes:
             if preview_shrink_mesh(obj.data, center, half, scale,
                                    tuple(obj.location), falloff, shift,
-                                   full and not is_body_mesh(obj, meshes),
+                                   not is_body_mesh(obj, meshes),
                                    origin):
                 count += 1
         _apply_eye_sink(coll, props.eye_sink, props.eye_sink_pad,
@@ -2051,7 +2049,6 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.label(text="Eye Sink: Body メッシュの目領域のみ (自動判定 or 選択指定) を"
                        "後ろに凹ませ、モーフ中の黒目浮きを相殺",
                   icon='INFO')
-        box.prop(props, "face_full_transform")
         row = box.row()
         row.operator("headshrink.center_on_head", icon='TRACKER')
         row.operator("headshrink.apply_box_position", icon='CHECKMARK')
