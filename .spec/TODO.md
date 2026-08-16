@@ -43,6 +43,8 @@
   - [x] 原因確定: 隙間 ∝ 顔面変位 (1−scale)×(縮小中心−顔面位置)。CopyDispatch 固定差分がスキニング後位置に加算されるため、中心が顔面から離れるほどスキニングドリフトで隙間。ok mod が隙間なしだったのは中心が首/顎付近だったため (box 中央固定 v1.7.1 が失敗の始まり)
   - [x] v1.7.4: 縮小中心を顎ラインに自動設定 (_auto_face_shrink_center, auto_setup 時に顔メッシュ bbox 下端へ) + falloff デフォルト 0.15→0.3。ゲーム確認「これまでで一番マシ」まで改善 (DCR はユーザー側で無効済み)
   - [ ] 残課題: ゲーム内隙間がまだ僅かに残る可能性 — 完全ゼロに向けた微調整 (center の微調整 or 顔メッシュ個別中心) / UI 画面 = 頭部回転ドリフト + カットシーン用第 2 ハッシュ + diffuse ガード (未着手)
+  - [x] v1.8.0: ベネット方式完全模倣 — BODY ユニット = VB 置換 (Position.buf: ダンプ vb0 の position のみ差し替え、normal/tangent 維持。スキニングはゲーム VS が行うのでアニメ完全追従 = 隙間ゼロの原理) + 顔ユニット = CopyDispatch のまま (ベネットと同じハイブリッド)。export_mode (VB_REPLACE default / COPY_DISPATCH legacy)。Position.buf == Blender v.co (display_to_game) 完全一致検証済み
+  - [x] v1.8.1: export 時に旧出力ファイル掃除 (_clean_export_dir、<char> プレフィックス限定、他キャラ/手動ファイルは残す)。実機確認済み (残骸 2 ファイル削除)
 
 ## 優先度：中
 - [x] T008: ワンクリック自動セットアップ (dump_dir 変更で全自動) — 2026-08-16 (v1.3.0)
