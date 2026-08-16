@@ -57,6 +57,17 @@ blk header (28B)
 - **update コールバック内で bpy.ops 直接呼びは再入リスク** → 0.1s タイマー経由 + `_last_auto_setup_dir` で連続発火抑制 (同値設定の再発火防止)
 - **サブエージェント検証の教訓**: fixer の完了報告は信頼せず必ず MD5 変化 + シンボル grep + テスト実行で実体検証する (1 回目は「完了」と報告しながらファイル無変更の虚偽報告があった。同一 task_id で resume し再委譲で解決)
 
+### CopyDispatch 顔変形の正規ワークフロー (2026-08-17 調査, effieface/Bennett 実物解析)
+- **CopyDispatch + base/key.buf は正規方式そのもの**。effieface (GameBanana 594772) / Bennett Boundless Resolve (674758) の実物 DL 解析で HLSL は当アドオンとほぼ同一 (`rw_buffer[DTid.x].position += key - base`)。HLSL 動的縮小への置換は不要 (一時検討したが撤回)
+- **$faceScale+OffsetFace (LeoTools) は非推奨** — VS シェーダー正規表現書き換え方式で、公式ガイドに「CURRENTLY NOT FUNCTIONAL / Somewhat deprecated」と明記
+- **正規ツール = facemodtools** (github.com/gdsfdg/facemodtools) + チュートリアル (gamebanana.com/tuts/18672, RainEndings):
+  - Clean dump (COLOR/TEXCOORD 削除、stride 40) → 無編集 export = base.buf → スカルプト (**頂点追加削除禁止**) → key.buf → **Reorder points** (orig.buf と base の位置一致から対応表、fixface.py)
+  - ⚠️ orig.buf は必ず「顔を抽出した元フレーム」のもの。別フレームで取り直すと直らない
+- **配布 mod の標準装備**: ① 各パーツ 2 ハッシュ (カットシーン用代替モデル: effieface eyes=5b7eeb4b+e889572b / Bennett eyes=978ce706+247b5b66 等) ② diffuse ガード ($is フラグ、顔パーツはキャラ間共有 IB のため他キャラ誤変形防止。effieface=32973700 / Bennett=2b1b2edf)
+- **頂点数検証 (Noelle, check_vertcount.py)**: 4 ユニット全て vert_count = IB max_index+1 一致 (EYES 1083 / MOUTH 877 / BROW 56 / BODY 15965) → Bennett の 715→714 問題は無く Reorder 不要 (頂点順序も編集していない)
+- **隙間の原因候補 (優先順)**: ① Reorder 未実施/別フレーム orig ② **DCR (Dynamic Character Resolution) 有効** — GIMI Issue #364 で「freaky geometry」が公式に認められた既知問題、無効化推奨 ③ カットシーン用第 2 ハッシュ不足 ④ diffuse ガードなし ⑤ 頭部回転ドリフト (推定): CopyDispatch の差分はダンプフレームのスキニング空間で定義され頭部回転に追従しない、誤差 (R−I)·d、縮小変位 d が大きいほど顕著 (Bennett の縮小ピボットは頭部表面近傍で変位最大 9mm)
+- **フィールドの隙間最有力 = box 境界の段差** (顎が box 縁付近、縮小で顎が動き box 外の首と段差。縮小量に比例 = ユーザー実験「0.5 縮小で隙間倍増」と整合)
+
 ### ハッシュ入力 UI (v1.4.0) 設計知見
 - **units は「いくつでも登録可」のホワイトリスト設計**: フィールドのみならボディ 1 つ、UI 画面も縮めるなら目/口/眉も登録。units_save は load_char_config で既存 config 取得 → units キーだけ更新 → save_char_config (face offsets と他キー無傷)
 - **ハッシュ取得方法 (GIMI UsageInstructions 調査)**: テンキー 0 でハンティングモード (該当ドローが消える) → テンキー 7/8 で IB サイクル・9 でコピー、/ * で VB サイクル・- でコピー。キャラクターメニュー内実施推奨 (フィールドはオブジェクト過多)。フレーム解析ダンプ (F8) は数 GB 級で密集地クラッシュ注意

@@ -145,6 +145,19 @@
 - **グループ未定義の IB 範囲は skip されたまま再発行されず消失する** (小物消失) → アドオンが `fill_uncovered_accessories()` で自動補完 (ACCESSORY/ACCESSORY2...)
 - デバッグ: `Mods\d3dx.ini` [Logging] calls=1 で `Mods\log.txt` に TextureOverride マッチ記録。調査後 calls=0 に戻す
 
+### 隙間バグ調査の経緯と結論 (2026-08-16〜17, v1.6.7〜v1.7.3)
+- 症状: 縮小反映 mod で顔メッシュとボディの間に隙間 (顎ライン・目口眉の段差・瞳が白目に埋まる)。フィールド/UI 両方で発生、縮小率に比例 (0.5 縮小で倍増)
+- 対応履歴:
+  - v1.6.7: export 補正 (1-s)*loc 加算 + shrink_origin 自動設定 (顎ライン) → **補正は逆効果** (境界 gap 0.038 新造、analyze_gap2 の数値比較で証明)
+  - v1.6.8: 誤補正撤去 (export を v1.6.6 相当に戻す)
+  - v1.6.9: shrink_origin.y/z 自動設定 → 境界 gap に影響なし (face/body 共通中心縮小のため)
+  - v1.7.0: **境界マッチング** (`_match_face_offsets`、headshrink_addon.py:1405) — 顔メッシュ配置 loc を body 境界との最近傍位置差中央値で収束計算。face_offsets.json の Noelle loc の y が 0.06-0.09 誤差だったのを修正 (EYES (-0.0195,-0.0372,0.3646) 等)
+  - v1.7.1: 縮小中心を box 中央 (shrink_center) に固定 (shrink_origin 自動設定廃止、ユーザー「box 中央に縮小」が自然という指摘)
+  - v1.7.2: auto_setup が保存済み shrink パラメータを上書きしないよう修正 (apply_char_config 呼び出し削除)
+  - v1.7.3: 顔メッシュは常に全頂点変形に固定 (face_full_transform チェック廃止)
+- 確認済み事実: CopyDispatch + base/key は正規方式 (effieface/Bennett 実物と HLSL 同一)。Noelle 4 ユニットの頂点数は IB と完全一致 (Reorder 不要)
+- **残課題 (未解決)**: ゲーム内での隙間が完全には消えていない。候補は ① DCR (Dynamic Character Resolution) 有効 (GIMI Issue #364 公式認定の freaky geometry、無効化確認が次の一手) ② フィールドの隙間 = box 境界の段差 (顎が box 縁付近) ③ UI 画面 = 頭部回転ドリフト + カットシーン用第 2 ハッシュ不足 + diffuse ガードなし。詳細は KNOWLEDGE.md「CopyDispatch 顔変形の正規ワークフロー」参照
+
 ## Noelle 実ダンプ構成 (2026-08-15 検証済み, FrameAnalysis-2026-08-15-222105)
 
 | パーツ | VB hash | IB hash | 頂点数 | 備考 |
