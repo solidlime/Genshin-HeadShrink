@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 6, 6),
+    "version": (1, 6, 8),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -1398,6 +1398,22 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _face_bbox_y_min(preview_objs):
+    """顔メッシュ群 (BODY 以外、loc != 0) の表示空間 bbox の y 最小値。
+
+    顎のライン対策: 縮小中心 (shrink_origin.y) の自動設定に使う。
+    該当メッシュが無ければ None を返す (現状値維持)。
+    """
+    face_objs = [o for o in preview_objs
+                 if o.get('hs_role') != 'BODY'
+                 and o.location != (0.0, 0.0, 0.0)
+                 and len(o.data.vertices) > 0]
+    if not face_objs:
+        return None
+    return min(v.co[1] + o.location[1]
+               for o in face_objs for v in o.data.vertices)
+
+
 def _preview_setup_impl(self, context):
     """Shared Preview Setup body (NHS_OT_PreviewSetup / NHS_OT_AutoSetup).
 
@@ -1465,6 +1481,13 @@ def _preview_setup_impl(self, context):
         for o in preview_objs:
             if o.name in saved:
                 o.location = tuple(saved[o.name])
+        # 顎ライン対策: 顔メッシュ群 (BODY 以外) の表示空間 bbox の y 最小値
+        # (顎のライン) を shrink_origin.y に自動設定 (x/z は現状値維持)。
+        # プレビューセットアップのたびに実行し、UI で後から変更可能。
+        y_min = _face_bbox_y_min(preview_objs)
+        if y_min is not None:
+            _origin = tuple(props.shrink_origin)
+            props.shrink_origin = (_origin[0], y_min, _origin[2])
         # Record the final placement (after auto-placement + saved offsets)
         # so Reset Preview can restore G-key moved faces to the setup-time
         # position. Stored per-vertex (POINT domain) like hs_original_pos;

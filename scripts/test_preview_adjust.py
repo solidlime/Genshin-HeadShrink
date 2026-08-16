@@ -1190,5 +1190,28 @@ class SelectionDisplayBBoxTest(unittest.TestCase):
         self.assertEqual(out, ((2.0, 3.0, 4.0), (2.0, 3.0, 4.0)))
 
 
+class FaceBBoxYMinTest(unittest.TestCase):
+    """_face_bbox_y_min: 顔メッシュ (BODY 以外・loc != 0) の表示空間 y 最小値。"""
+
+    def test_face_mesh_min_y(self):
+        # EYES loc=(0,-0.1,0.3): 表示空間 y = 0.4-0.1 = 0.3 / -0.5-0.1 = -0.6
+        objs = [
+            _FakeObj('BODY', (0.0, 0.0, 0.0),
+                     [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
+            _FakeObj('EYES', (0.0, -0.1, 0.3),
+                     [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
+        ]
+        self.assertEqual(hs._face_bbox_y_min(objs), -0.6)
+
+    def test_body_only_returns_none(self):
+        objs = [_FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.4, 0.9)])]
+        self.assertIsNone(hs._face_bbox_y_min(objs))
+
+    def test_face_at_origin_excluded(self):
+        # loc == (0,0,0) の顔メッシュは対象外 (body に重なる配置のため)
+        objs = [_FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.2)])]
+        self.assertIsNone(hs._face_bbox_y_min(objs))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
