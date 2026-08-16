@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 6, 9),
+    "version": (1, 7, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -27,6 +27,11 @@ try:
     import bpy
 except ImportError:  # headless import (unit tests / py_compile)
     bpy = None  # type: ignore[assignment]
+
+try:
+    import numpy as np  # Blender 同梱 (境界マッチングで使用)
+except ImportError:
+    np = None  # type: ignore[assignment]
 
 # ===== CONSTANTS =====
 DUMP_STRIDE = 40                    # Genshin standard position stride (float3 at offset 0)
@@ -107,9 +112,9 @@ def preview_shrink_mesh(mesh, center, half, scale, offset=(0.0, 0.0, 0.0),
     offset); results are written back in local coordinates. offset=(0,0,0)
     behaves exactly like plain local-space shrinking. all_verts=True skips
     the box test (uniform shrink+shift over the whole mesh). origin is the
-    scale pivot in display coords (see shrink_positions); None keeps the
-    legacy pivot = center. Returns True when applied; False when the mesh
-    has no hs_original_pos attribute.
+    scale pivot in display coords; callers pass the box center so shrinking
+    heads toward the box middle. Returns True when applied; False when the
+    mesh has no hs_original_pos attribute.
     """
     attr = mesh.attributes.get('hs_original_pos')
     if attr is None:
@@ -333,11 +338,10 @@ def shrink_positions(verts, center, half, scale, falloff=0.0,
     Axes with half[i] == 0 are excluded from the distance so a zero-thickness
     axis never disables the fade (and never divides by zero).
 
-    origin is the scale pivot, decoupled from the box position: the box test
-    (d vs center/half) picks WHICH vertices transform, while scaling happens
-    about 'origin'. origin=None keeps the legacy pivot = center. Typical use:
-    box centered on the head, origin at the neck so the head shrinks toward
-    the neck without drifting.
+    origin is the scale pivot: the box test (d vs center/half) picks WHICH
+    vertices transform, while scaling happens about 'origin'. origin=None
+    keeps the legacy pivot = center; callers typically pass center so the
+    head shrinks toward the box middle.
 
     all_verts=True skips the box test entirely: every vertex maps to
     origin + (p - origin) * scale + shift (uniform shrink+shift). Used for
@@ -792,7 +796,7 @@ def _preview_props_update(self, context):
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
     full = self.face_full_transform
-    origin = tuple(self.shrink_origin)
+    origin = tuple(self.shrink_center)  # 縮小中心は box 中央に固定
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         preview_shrink_mesh(obj.data, center, half, scale,
@@ -1398,24 +1402,58 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _face_bbox_min(preview_objs):
-    """顔メッシュ群 (BODY 以外、loc != 0) の表示空間 bbox の (y, z) 最小値。
+def _match_face_offsets(body_mesh, face_objs, initial_locs,
+                        dist_threshold=0.02, max_iter=6, tol=0.0005):
+    """顔メッシュの配置オフセットを body との境界マッチングで自動計算。
 
-    顎のライン対策: 縮小中心 (shrink_origin) の自動設定に使う。顔メッシュ
-    の表示空間 bbox (v.co + obj.location) の y 最小値 (顎のライン) と
-    z 最小値 (首/顎の高さ) を返し、body と顔メッシュの相対ズレを防ぐ。
-    該当メッシュが無ければ None を返す (現状値維持)。
+    顔メッシュの表示頂点 (v.co + loc) から最近傍の body 頂点を探し、
+    境界ペア (距離 < dist_threshold) の位置差 (body - 顔) の各軸中央値で
+    loc を反復更新して収束させる。顔メッシュが body と正しく噛み合う
+    配置 (loc) を求める (保存済み face_offsets の無いメッシュ向け)。
+
+    body_mesh: BODY ロールの bpy オブジェクト (表示頂点 = v.co + obj.location)
+    face_objs: 顔メッシュの bpy オブジェクト群 (location は (0,0,0) 想定)
+    initial_locs: {vb0_hash: (x, y, z)} 従来の head_center - face_center 値
+    戻り値: {vb0_hash: (x, y, z)} 収束 loc (収束しなくても max_iter 後の値)
     """
-    face_objs = [o for o in preview_objs
-                 if o.get('hs_role') != 'BODY'
-                 and o.location != (0.0, 0.0, 0.0)
-                 and len(o.data.vertices) > 0]
-    if not face_objs:
-        return None
-    return (min(v.co[1] + o.location[1]
-                for o in face_objs for v in o.data.vertices),
-            min(v.co[2] + o.location[2]
-                for o in face_objs for v in o.data.vertices))
+    if np is None:
+        return dict(initial_locs)
+    body_pts = np.asarray(
+        [tuple(v.co) for v in body_mesh.data.vertices], dtype=np.float64)
+    if len(body_pts) == 0:
+        return {}
+    body_pts += np.asarray(tuple(body_mesh.location), dtype=np.float64)
+    out = {}
+    for o in face_objs:
+        vb0 = str(o.get('hs_vb0_hash', ''))
+        face_pts = np.asarray(
+            [tuple(v.co) for v in o.data.vertices], dtype=np.float64)
+        if len(face_pts) == 0:
+            continue
+        loc = np.asarray(initial_locs.get(vb0, (0.0, 0.0, 0.0)),
+                         dtype=np.float64)
+        for _ in range(max_iter):
+            disp = face_pts + loc  # 顔メッシュの表示頂点 (n,3)
+            # 最近傍 body 頂点をチャンク処理で探索 (メモリ爆発防止)。
+            # 顔頂点を 256 個ずつに分け、各チャンクで距離計算 + argmin。
+            diffs = []
+            for start in range(0, len(disp), 256):
+                chunk = disp[start:start + 256]
+                d = chunk[:, None, :] - body_pts[None, :, :]
+                dist2 = np.einsum('ijk,ijk->ij', d, d)
+                nearest = np.argmin(dist2, axis=1)
+                dmin = np.sqrt(dist2[np.arange(chunk.shape[0]), nearest])
+                mask = dmin < dist_threshold
+                if mask.any():
+                    diffs.append(body_pts[nearest[mask]] - chunk[mask])
+            if not diffs:
+                break  # 境界ペア 0 件 → loc 不変で停止
+            med = np.median(np.concatenate(diffs, axis=0), axis=0)
+            loc = loc + med  # 外れ値に強い中央値で更新
+            if np.max(np.abs(med)) < tol:
+                break  # 収束
+        out[vb0] = tuple(float(c) for c in loc)
+    return out
 
 
 def _preview_setup_impl(self, context):
@@ -1464,7 +1502,9 @@ def _preview_setup_impl(self, context):
     # object location (display coords; user can still tweak with G).
     preview_objs = [o for o in coll.objects if o.type == 'MESH']
     if preview_objs:
-        main = max(preview_objs, key=lambda o: len(o.data.vertices))
+        body_objs = [o for o in preview_objs if o.get('hs_role') == 'BODY']
+        main = body_objs[0] if body_objs else max(
+            preview_objs, key=lambda o: len(o.data.vertices))
         head_center = head_center_from_verts(
             [tuple(v.co) for v in main.data.vertices])
         if head_center is not None:
@@ -1485,15 +1525,19 @@ def _preview_setup_impl(self, context):
         for o in preview_objs:
             if o.name in saved:
                 o.location = tuple(saved[o.name])
-        # 顎ライン対策: 顔メッシュ群 (BODY 以外) の表示空間 bbox の
-        # (y, z) 最小値 (顎のライン + 首/顎の高さ) を shrink_origin に
-        # 自動設定 (x は現状値維持)。プレビューセットアップのたびに実行
-        # し、UI で後から変更可能。
-        origin_min = _face_bbox_min(preview_objs)
-        if origin_min is not None:
-            y_min, z_min = origin_min
-            _origin = tuple(props.shrink_origin)
-            props.shrink_origin = (_origin[0], y_min, z_min)
+        # 境界マッチング: 保存済み offsets の無い顔メッシュのみ、body との
+        # 最近傍境界ペアから収束 loc を自動計算して適用 (保存値は従来通り
+        # 優先。収束値は JSON には保存せず、毎回 auto_setup で再計算)。
+        face_objs = [o for o in preview_objs
+                     if o is not main and o.name not in saved]
+        if face_objs:
+            initial_locs = {o.get('hs_vb0_hash', ''): tuple(o.location)
+                            for o in face_objs}
+            matched = _match_face_offsets(main, face_objs, initial_locs)
+            for o in face_objs:
+                loc = matched.get(o.get('hs_vb0_hash', ''))
+                if loc is not None:
+                    o.location = loc
         # Record the final placement (after auto-placement + saved offsets)
         # so Reset Preview can restore G-key moved faces to the setup-time
         # position. Stored per-vertex (POINT domain) like hs_original_pos;
@@ -1593,7 +1637,7 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
         full = props.face_full_transform
-        origin = tuple(props.shrink_origin)
+        origin = tuple(props.shrink_center)  # 縮小中心は box 中央に固定
         meshes = [o for o in coll.objects if o.type == 'MESH']
         count = 0
         for obj in meshes:
@@ -1997,9 +2041,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.label(text="Save Default: 現在の値を全キャラ共通の基準として保存。"
                        "Load Default: 基準値を現在の設定に適用", icon='INFO')
         box.prop(props, "shrink_center")
-        box.prop(props, "shrink_origin")
-        box.label(text="縮小中心 (首元等の回転中心)。Box 位置とは独立",
-                  icon='INFO')
+        box.label(text="縮小中心は Box 中央に固定", icon='INFO')
         box.prop(props, "shrink_half")
         box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")

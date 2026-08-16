@@ -14,6 +14,8 @@ import tempfile
 import types
 import unittest
 
+import numpy as np  # noqa: E402 (境界マッチングテスト用)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
@@ -1076,15 +1078,20 @@ class EyeSinkTest(unittest.TestCase):
 class _FakeObj:
     """Minimal bpy object stand-in for eye_region_bboxes tests."""
 
-    def __init__(self, role, location, verts):
+    def __init__(self, role, location, verts, vb0=None):
         self.type = 'MESH'
         self.location = location
         self._role = role
+        self._vb0 = vb0
         self.data = types.SimpleNamespace(vertices=[
             types.SimpleNamespace(co=v) for v in verts])
 
     def get(self, key, default=None):
-        return self._role if key == 'hs_role' else default
+        if key == 'hs_role':
+            return self._role
+        if key == 'hs_vb0_hash':
+            return self._vb0 if self._vb0 is not None else default
+        return default
 
 
 class EyeRegionBBoxesTest(unittest.TestCase):
@@ -1190,53 +1197,78 @@ class SelectionDisplayBBoxTest(unittest.TestCase):
         self.assertEqual(out, ((2.0, 3.0, 4.0), (2.0, 3.0, 4.0)))
 
 
-class FaceBBoxYMinTest(unittest.TestCase):
-    """_face_bbox_min: 顔メッシュ (BODY 以外・loc != 0) の表示空間 (y, z) 最小値。"""
+class MatchFaceOffsetsTest(unittest.TestCase):
+    """_match_face_offsets: 顔メッシュを body に重ねる loc の境界マッチング。"""
 
-    def test_face_mesh_min_y(self):
-        # EYES loc=(0,-0.1,0.3):
-        #   表示空間 y = 0.4-0.1 = 0.3 / -0.5-0.1 = -0.6 → min -0.6
-        #   表示空間 z = 0.9+0.3 = 1.2 / 0.2+0.3 = 0.5 → min 0.5
-        objs = [
-            _FakeObj('BODY', (0.0, 0.0, 0.0),
-                     [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
-            _FakeObj('EYES', (0.0, -0.1, 0.3),
-                     [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
-        ]
-        self.assertEqual(hs._face_bbox_min(objs), (-0.6, 0.5))
+    @staticmethod
+    def _grid(n=10, spacing=0.1):
+        return [(x * spacing, y * spacing, z * spacing)
+                for x in range(n) for y in range(n) for z in range(n)]
 
-    def test_body_only_returns_none(self):
-        objs = [_FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.4, 0.9)])]
-        self.assertIsNone(hs._face_bbox_min(objs))
+    def _body(self):
+        return types.SimpleNamespace(
+            location=(0.0, 0.0, 0.0),
+            data=types.SimpleNamespace(vertices=[
+                types.SimpleNamespace(co=v) for v in self._grid()]))
 
-    def test_face_at_origin_excluded(self):
-        # loc == (0,0,0) の顔メッシュは対象外 (body に重なる配置のため)
-        objs = [_FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.2)])]
-        self.assertIsNone(hs._face_bbox_min(objs))
+    def _z0_verts(self):
+        return [v for v in self._grid() if abs(v[2]) < 1e-9]
 
-    def test_min_axes_from_different_meshes(self):
-        # y 最小 (EYES) と z 最小 (MOUTH) が別メッシュから来ても個別に最小
-        objs = [
-            _FakeObj('EYES', (0.0, 0.0, 0.1),
-                     [(0.0, -0.5, 1.2)]),   # y=-0.5, z=1.3
-            _FakeObj('MOUTH', (0.0, 0.1, 0.3),
-                     [(0.0, 0.4, 0.02)]),   # y=0.5, z=0.32
-        ]
-        self.assertEqual(hs._face_bbox_min(objs), (-0.5, 0.32))
+    def test_offset_T_recovered(self):
+        # 顔は body の z=0 層から T だけずれた位置にある (正しい loc = T)
+        T = (0.03, -0.05, 0.02)
+        face_verts = [(v[0] - T[0], v[1] - T[1], v[2] - T[2])
+                      for v in self._z0_verts()]
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), face_verts, vb0='63f702ce')
+        out = hs._match_face_offsets(
+            self._body(), [face], {'63f702ce': (0.0, 0.0, 0.0)},
+            dist_threshold=0.08)
+        for i in range(3):
+            self.assertAlmostEqual(out['63f702ce'][i], T[i], delta=0.002)
 
-    def test_multiple_faces_global_min(self):
-        # 3 メッシュ全体での最小 (MOUTH が y/z 両方の最小)
-        objs = [
-            _FakeObj('EYES', (0.0, -0.1, 0.3),
-                     [(0.0, 0.4, 0.9)]),    # y=0.3, z=1.2
-            _FakeObj('MOUTH', (0.0, 0.05, 0.1),
-                     [(0.0, -0.3, 0.02)]),  # y=-0.25, z=0.12
-            _FakeObj('BROW', (0.0, 0.1, 0.2),
-                     [(0.0, 0.2, 1.5)]),    # y=0.3, z=1.7
-        ]
-        y_min, z_min = hs._face_bbox_min(objs)
-        self.assertAlmostEqual(y_min, -0.25)
-        self.assertAlmostEqual(z_min, 0.12)
+    def test_zero_offset_recovered(self):
+        # 顔が body と完全一致 → loc は 0 に収束 (初期値の誤差を打ち消す)
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), self._z0_verts(),
+                        vb0='63f702ce')
+        out = hs._match_face_offsets(
+            self._body(), [face], {'63f702ce': (0.02, -0.01, 0.03)},
+            dist_threshold=0.08)
+        for i in range(3):
+            self.assertAlmostEqual(out['63f702ce'][i], 0.0, delta=0.002)
+
+    def test_far_face_unchanged(self):
+        # 境界ペア 0 件 (body から遠い) → loc は初期値のまま変化しない
+        far = [(v[0] + 5.0, v[1] + 5.0, v[2] + 5.0) for v in self._grid()]
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), far, vb0='63f702ce')
+        initial = (0.1, 0.2, 0.3)
+        out = hs._match_face_offsets(
+            self._body(), [face], {'63f702ce': initial})
+        self.assertEqual(out['63f702ce'], initial)
+
+    def test_delta_monotonic_decrease(self):
+        # 反復ごとの更新量 (delta) が単調減少する (収束性)
+        T = (0.03, -0.05, 0.02)
+        face_verts = [(v[0] - T[0], v[1] - T[1], v[2] - T[2])
+                      for v in self._z0_verts()]
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), face_verts, vb0='63f702ce')
+        orig_median = hs.np.median
+        deltas = []
+
+        def spy_median(a, axis=0):
+            m = orig_median(a, axis=axis)
+            deltas.append(float(np.max(np.abs(m))))
+            return m
+
+        hs.np.median = spy_median
+        try:
+            hs._match_face_offsets(
+                self._body(), [face], {'63f702ce': (0.0, 0.0, 0.0)},
+                dist_threshold=0.08)
+        finally:
+            hs.np.median = orig_median
+        self.assertGreater(len(deltas), 1)  # 複数反復した
+        self.assertTrue(all(deltas[i] >= deltas[i + 1]
+                            for i in range(len(deltas) - 1)))
 
 
 if __name__ == '__main__':
