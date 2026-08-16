@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 7, 3),
+    "version": (1, 7, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -1040,7 +1040,7 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         description="Fade band width beyond the box (ratio of box size). The "
                     "shrink factor blends smoothly back to 1.0 across the "
                     "band. 0.3-0.5 shows the smoothest transition",
-        default=0.15, min=0.0, max=1.0, step=0.01, precision=3,
+        default=0.3, min=0.0, max=1.0, step=0.01, precision=3,
         update=_preview_props_update,
     )
     shrink_shift: bpy.props.FloatVectorProperty(
@@ -1455,6 +1455,45 @@ def _match_face_offsets(body_mesh, face_objs, initial_locs,
     return out
 
 
+def _face_bbox_min(meshes):
+    """Display-space bbox min (y_min, z_min) over placed face meshes.
+
+    Face mesh = non-BODY (is_body_mesh False) with a non-zero location
+    (auto-placed by _preview_setup_impl; unplaced dump copies sit at
+    (0,0,0) and are excluded). Coordinates are display space (v.co +
+    obj.location). Returns None when no such mesh.
+    """
+    placed = [o for o in meshes
+              if not is_body_mesh(o, meshes)
+              and tuple(o.location) != (0.0, 0.0, 0.0)]
+    if not placed:
+        return None
+    y_min = z_min = float('inf')
+    for o in placed:
+        off = tuple(o.location)
+        for v in o.data.vertices:
+            y = v.co[1] + off[1]
+            z = v.co[2] + off[2]
+            if y < y_min:
+                y_min = y
+            if z < z_min:
+                z_min = z
+    return (y_min, z_min)
+
+
+def _auto_face_shrink_center(props, meshes):
+    """Set shrink_center y/z to the jaw line (face bbox min); x unchanged.
+
+    No placed face mesh -> leave shrink_center untouched. Called from
+    _preview_setup_impl after face placement so the shrink box (created
+    from props.shrink_center) sits near the jaw: face displacement delta
+    = (1-scale)*(center-face_pos) stays small, avoiding mod gaps.
+    """
+    face_min = _face_bbox_min(meshes)
+    if face_min is not None:
+        props.shrink_center = (props.shrink_center[0], face_min[0], face_min[1])
+
+
 def _preview_setup_impl(self, context):
     """Shared Preview Setup body (NHS_OT_PreviewSetup / NHS_OT_AutoSetup).
 
@@ -1554,6 +1593,12 @@ def _preview_setup_impl(self, context):
     # Orange wireframe of the shrink box, origin at shrink_center so the
     # user can grab it with G and Apply Box Position reads it back.
     props = context.scene.headshrink_props
+    # 縮小中心を顎ライン付近へ自動設定: 配置済み顔メッシュの表示空間 bbox
+    # 最小 (y,z) を shrink_center に合わせる (x は現状維持)。顔面変位
+    # δ=(1-scale)×(center-face_pos) を小さく保ち、CopyDispatch 固定差分
+    # 加算とスキニングの干渉による隙間を抑える。顔メッシュ無しなら触らない。
+    # HS_ShrinkBox はこの center で作られるため、設定後に呼ぶこと。
+    _auto_face_shrink_center(props, preview_objs)
     _create_shrink_box(coll, tuple(props.shrink_center),
                        tuple(props.shrink_half))
     self.report({'INFO'}, f"Preview ready: {len(src_objs)} meshes in {PREVIEW_COLLECTION}")
@@ -2054,6 +2099,9 @@ class NHS_PT_Panel(bpy.types.Panel):
         row.operator("headshrink.apply_box_position", icon='CHECKMARK')
         box.label(text="Box はワイヤーフレームで表示。G キーで移動 → "
                        "Apply Box Position で反映", icon='INFO')
+        box.label(text="縮小中心はセットアップ時に顎ライン付近へ自動設定 "
+                       "(顔メッシュの下端基準)。隙間が出にくい位置になっている",
+                  icon='INFO')
 
         # ---- Step 5: mod 生成 (出力) ----
         box = layout.box()
