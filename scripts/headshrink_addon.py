@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 7, 5),
+    "version": (1, 8, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -22,12 +22,12 @@ import math
 import os
 import re
 import struct
+import glob
 
 try:
     import bpy
 except ImportError:  # headless import (unit tests / py_compile)
     bpy = None  # type: ignore[assignment]
-
 try:
     import numpy as np  # Blender 同梱 (境界マッチングで使用)
 except ImportError:
@@ -383,6 +383,65 @@ def replace_positions(base_data, new_verts, stride=DUMP_STRIDE):
     return bytes(out)
 
 
+def build_position_buf(dump_bytes, game_verts, stride=DUMP_STRIDE):
+    """Replace the position float3 of each vertex in a real dump vb0 buffer.
+
+    normal/tangent/etc. bytes are kept from the dump; only bytes 0..12 change.
+    game_verts must already be in game space (display_to_game applied by the
+    caller). This is the Bennett vb0-replacement path: the game VS re-skins
+    these positions every frame, so animations follow exactly.
+    """
+    out = bytearray(dump_bytes)
+    for v, p in enumerate(game_verts):
+        struct.pack_into('<3f', out, v * stride, *p)
+    return bytes(out)
+
+
+def find_dump_vb0_path(dump_dir, vb_hash, dump_cache=None):
+    """Path of a dumped vb0 file for vb_hash.
+
+    Consults dump_cache (scan_dump_dir pairs) first, then falls back to
+    scanning dump_dir for '*vb0=<hash>-*.buf' filenames (several shader
+    variants may exist; the first match wins). None when not found.
+    """
+    vb_hash = str(vb_hash).lower()
+    if dump_cache:
+        for p in dump_cache:
+            if str(p.get('vb0', '')).lower() == vb_hash and p.get('vb0_path'):
+                return p['vb0_path']
+    try:
+        names = os.listdir(dump_dir)
+    except OSError:
+        return None
+    for fn in names:
+        if fn.lower().endswith('.buf') and f'vb0={vb_hash}' in fn.lower():
+            return os.path.join(dump_dir, fn)
+    return None
+
+
+def _clean_export_dir(output_dir, char_name):
+    """Remove stale files from a previous export (same char only).
+
+    Deletes <char>.ini, <char>*.hlsl and <char>*.buf so switching export
+    modes (VB Replace vs CopyDispatch) leaves no orphaned Base/Key/Position
+    buffers behind. Files whose name does not start with the char name are
+    left untouched. Returns the number of files removed.
+    """
+    removed = 0
+    if not os.path.isdir(output_dir):
+        return 0
+    for pattern in (f"{char_name}.ini",
+                    f"{char_name}*.hlsl",
+                    f"{char_name}*.buf"):
+        for fn in glob.glob(os.path.join(output_dir, pattern)):
+            try:
+                os.remove(fn)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 # ===== SHRINK BOX WIREFRAME (bpy-independent) =====
 def box_wireframe_verts(center, half):
     """8 corners of the axis-aligned box (center ± half per axis), display coords."""
@@ -422,16 +481,33 @@ def box_center_from_obj(obj):
     return tuple(local[i] + loc[i] for i in range(3))
 
 
-def build_diff_ini(char, units):
-    """units: [{name(char+Unit), vb_hash, vert_count}] -> CopyDispatch ini text.
+def build_diff_ini(char, units, mode='VB_REPLACE'):
+    """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
-    TextureOverride switches the vb0 hash to a CommandList that copies the
-    original VB into Resource<name>Dif, runs CustomShader<name> (delta =
-    key - base per vertex), then copies the result back over the original.
+    VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
+    buffer override ([TextureOverride] + [Resource...Position] with the
+    pre-skin position buffer) so the game VS keeps animating it — no
+    CommandList/CustomShader. Every other unit (face roles, no role) keeps
+    the legacy CopyDispatch structure. COPY_DISPATCH mode renders all units
+    via CopyDispatch regardless of role.
     """
     parts = ["[Constants]", "global $active = 0", "", "[Present]", "post $active = 0", ""]
     for u in units:
         n = u['name']
+        if mode == 'VB_REPLACE' and u.get('role') == 'BODY':
+            parts += [
+                f"[TextureOverride{n}]",
+                f"hash = {u['vb_hash']}",
+                f"vb0 = Resource{n}Position",
+                "$active = 1",
+                "",
+                f"[Resource{n}Position]",
+                "type = Buffer",
+                f"stride = {DUMP_STRIDE}",
+                f"filename = {n}Position.buf",
+                "",
+            ]
+            continue
         parts += [
             f"[TextureOverride{n}]",
             f"hash = {u['vb_hash']}",
@@ -941,6 +1017,22 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         name="Output Dir",
         default=r"G:\XXMI-Launcher-Portable\Mods\Mods\HeadShrink\assets\Preview",
         subtype='DIR_PATH',
+    )
+    export_mode: bpy.props.EnumProperty(
+        name="Export Mode",
+        description="VB Replace (Bennett): the body is exported as a vb0 "
+                    "position-buffer override so the game VS re-skins it "
+                    "every frame (animations follow, no gaps); face parts "
+                    "use CopyDispatch. CopyDispatch (legacy): all units via "
+                    "CopyDispatch delta shader",
+        items=[
+            ('VB_REPLACE', 'VB Replace (Bennett)',
+             'Body via vb0 position buffer replacement, face via CopyDispatch '
+             '(animations follow)'),
+            ('COPY_DISPATCH', 'CopyDispatch (legacy)',
+             'All units via CopyDispatch'),
+        ],
+        default='VB_REPLACE',
     )
     # ---- 3DMigoto dump workflow ----
     dump_dir: bpy.props.StringProperty(
@@ -1897,7 +1989,7 @@ class NHS_OT_LoadDefaultConfig(bpy.types.Operator):
 class NHS_OT_ExportDiff(bpy.types.Operator):
     bl_idname = "headshrink.export_diff"
     bl_label = "Mod Export"
-    bl_description = "Write <char><Unit>Base/Key.buf + <char>Head.hlsl + <char>.ini (CopyDispatch)"
+    bl_description = "Write <char><Unit> Position/Base/Key.buf + <char>Head.hlsl + <char>.ini (VB Replace or CopyDispatch)"
 
     def execute(self, context):
         props = context.scene.headshrink_props
@@ -1908,9 +2000,12 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             self.report({'ERROR'}, f"No {PREVIEW_COLLECTION} collection (Preview Setup first)")
             return {'CANCELLED'}
         os.makedirs(output_dir, exist_ok=True)
+        cleared = _clean_export_dir(output_dir, char_name)
+        mode = props.export_mode
         meshes = [o for o in coll.objects
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
+        fallback_names = []
         for obj in meshes:
             vb0 = obj['hs_vb0_hash']
             mesh = obj.data
@@ -1919,21 +2014,43 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 self.report({'ERROR'}, f"{obj.name}: no hs_original_pos (run Preview Apply first)")
                 return {'CANCELLED'}
             vert_count = len(mesh.vertices)
+            role = obj.get('hs_role', 'OTHER')
+            unit = unit_name_for_role(role, vb0)
+            name = char_name + unit
+            # v.co already carries every preview transform (shrink, shift)
+            # because preview_shrink_mesh writes back local coords.
+            verts = [display_to_game(tuple(v.co)) for v in mesh.vertices]
+            if mode == 'VB_REPLACE' and role == 'BODY':
+                dump_path = find_dump_vb0_path(
+                    props.dump_dir, vb0, _dump_cache.get('pairs'))
+                if dump_path is not None:
+                    # Bennett-mimic: overwrite only the position float3 of
+                    # the real pre-skin vb0. normal/tangent stay from the
+                    # dump; the game VS re-skins the new positions, so the
+                    # body follows animations exactly.
+                    with open(dump_path, 'rb') as f:
+                        dump_bytes = f.read()
+                    pos_data = build_position_buf(dump_bytes, verts)
+                    with open(os.path.join(output_dir, f"{name}Position.buf"),
+                              'wb') as f:
+                        f.write(pos_data)
+                    units.append({'name': name, 'vb_hash': vb0,
+                                  'vert_count': vert_count, 'role': 'BODY'})
+                    continue
+                # Dump vb0 missing -> fall back to CopyDispatch for this unit.
+                fallback_names.append(name)
+                self.report({'WARNING'},
+                            f"{name}: dump vb0 for {vb0} not found in "
+                            f"{props.dump_dir}; exporting via CopyDispatch")
+            # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
             flat = [0.0] * (vert_count * 3)
             attr.data.foreach_get('vector', flat)
-            # Base = original (pre-shrink) positions, back to game space so the
-            # .buf files match the dump. The HLSL delta shader reads only the
-            # position component, so normal/tangent are left zero.
+            # Base = original (pre-shrink) positions, back to game space so
+            # the .buf files match the dump. The HLSL delta shader reads only
+            # the position component, so normal/tangent are left zero.
             base_verts = [display_to_game(tuple(flat[i:i + 3]))
                           for i in range(0, len(flat), 3)]
             base_data = replace_positions(bytes(vert_count * DUMP_STRIDE), base_verts, DUMP_STRIDE)
-            unit = unit_name_for_role(obj.get('hs_role', 'OTHER'), vb0)
-            name = char_name + unit
-            # v.co already carries every preview transform (shrink, shift)
-            # because preview_shrink_mesh writes back local coords. Export
-            # the mesh state as-is; the delta shader pushes it toward the
-            # head every frame. The body (box mode) is never shifted.
-            verts = [display_to_game(tuple(v.co)) for v in mesh.vertices]
             key_data = replace_positions(base_data, verts, DUMP_STRIDE)
             with open(os.path.join(output_dir, f"{name}Base.buf"), 'wb') as f:
                 f.write(base_data)
@@ -1946,10 +2063,12 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units))
+            f.write(build_diff_ini(char_name, units, mode))
+        extra = f"; CopyDispatch fallback: {', '.join(fallback_names)}" if fallback_names else ""
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
-                              f"{', '.join(u['name'] for u in units)})")
+                              f"{', '.join(u['name'] for u in units)}){extra}"
+                              f"{'; cleared ' + str(cleared) + ' stale file(s)' if cleared else ''}")
         return {'FINISHED'}
 
 
@@ -2131,6 +2250,9 @@ class NHS_PT_Panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="⑤ mod 生成 (出力)", icon='EXPORT')
         box.prop(props, "output_dir")
+        box.prop(props, "export_mode")
+        box.label(text="VB Replace: ボディは VB 置換 (アニメ追従・隙間対策)。"
+                       "顔パーツは CopyDispatch", icon='INFO')
         box.operator("headshrink.export_diff", icon='EXPORT')
 
 

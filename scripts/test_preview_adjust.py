@@ -514,6 +514,107 @@ class BuildDiffIniTest(unittest.TestCase):
                         ini.index('[TextureOverrideNoelleEyes]'))
 
 
+class BuildDiffIniModeTest(unittest.TestCase):
+    """build_diff_ini mode='VB_REPLACE' (Bennett-mimic): BODY role -> vb0
+    buffer override only; face roles / no-role / COPY_DISPATCH keep the
+    legacy CopyDispatch structure."""
+
+    def test_vb_replace_body_uses_buffer_override(self):
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleBody', 'vb_hash': 'def7af36', 'vert_count': 15965,
+             'role': 'BODY'},
+        ])
+        for needle in [
+            '[TextureOverrideNoelleBody]',
+            'hash = def7af36',
+            'vb0 = ResourceNoelleBodyPosition',
+            '$active = 1',
+            '[ResourceNoelleBodyPosition]',
+            'type = Buffer',
+            'stride = 40',
+            'filename = NoelleBodyPosition.buf',
+        ]:
+            self.assertIn(needle, ini)
+        for banned in ['CommandListNoelleBody', 'CustomShaderNoelleBody',
+                       'Base.buf', 'Key.buf', 'cs-u1', 'Dispatch =']:
+            self.assertNotIn(banned, ini)
+
+    def test_vb_replace_face_keeps_copydispatch(self):
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleEyes', 'vb_hash': '63f702ce', 'vert_count': 1083,
+             'role': 'EYES'},
+        ])
+        self.assertIn('run = CommandListNoelleEyes', ini)
+        self.assertIn('run = CustomShaderNoelleEyes', ini)
+        self.assertNotIn('Position.buf', ini)
+
+    def test_vb_replace_mixed_body_and_face(self):
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleBody', 'vb_hash': 'def7af36', 'vert_count': 15965,
+             'role': 'BODY'},
+            {'name': 'NoelleEyes', 'vb_hash': '63f702ce', 'vert_count': 1083,
+             'role': 'EYES'},
+        ])
+        self.assertIn('vb0 = ResourceNoelleBodyPosition', ini)
+        self.assertIn('run = CommandListNoelleEyes', ini)
+        self.assertLess(ini.index('[TextureOverrideNoelleBody]'),
+                        ini.index('[TextureOverrideNoelleEyes]'))
+
+    def test_copydispatch_mode_ignores_role(self):
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleBody', 'vb_hash': 'def7af36', 'vert_count': 15965,
+             'role': 'BODY'},
+        ], mode='COPY_DISPATCH')
+        self.assertIn('run = CommandListNoelleBody', ini)
+        self.assertNotIn('Position.buf', ini)
+
+    def test_no_role_defaults_to_copydispatch(self):
+        # role キー無し (既存呼び出し) はデフォルトモードでも CopyDispatch
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleHead', 'vb_hash': 'def7af36', 'vert_count': 15965},
+        ])
+        self.assertIn('run = CommandListNoelleHead', ini)
+
+
+class PositionBufTest(unittest.TestCase):
+    """Position.buf helper: dump vb0 bytes with position float3 replaced,
+    normal/tangent bytes kept; dump vb0 path lookup."""
+
+    def test_build_position_buf_replaces_pos_keeps_rest(self):
+        n = 3
+        dump = bytearray()
+        for v in range(n):
+            dump += struct.pack('<3f', float(v), 0.0, 0.0)  # position
+            dump += struct.pack('<3f', 0.5, 0.5, 0.5)       # normal (keep)
+            dump += b'\xAA' * (40 - 24)                     # tangent + rest
+        new_pos = [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)]
+        out = hs.build_position_buf(bytes(dump), new_pos)
+        self.assertEqual(len(out), n * 40)
+        for v in range(n):
+            self.assertEqual(struct.unpack_from('<3f', out, v * 40),
+                             new_pos[v])
+            self.assertEqual(struct.unpack_from('<3f', out, v * 40 + 12),
+                             (0.5, 0.5, 0.5))
+            self.assertEqual(out[v * 40 + 24:v * 40 + 40], b'\xAA' * 16)
+
+    def test_find_dump_vb0_path_cache_hit(self):
+        cache = [{'vb0': 'def7af36', 'vb0_path': r'C:\d\a.buf'}]
+        self.assertEqual(hs.find_dump_vb0_path('X', 'def7af36', cache),
+                         r'C:\d\a.buf')
+
+    def test_find_dump_vb0_path_glob_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, '000124-vb0=def7af36-vs=x.buf')
+            with open(p, 'wb') as f:
+                f.write(b'\x00' * 40)
+            got = hs.find_dump_vb0_path(tmp, 'def7af36', None)
+            self.assertEqual(got, p)
+
+    def test_find_dump_vb0_path_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(hs.find_dump_vb0_path(tmp, 'deadbeef', None))
+
+
 class ShrinkShiftTest(unittest.TestCase):
     def test_zero_shift_legacy_behavior(self):
         # shift=(0,0,0) keeps legacy: in-box scaled, outside unchanged
@@ -1335,6 +1436,34 @@ class FaceBBoxCenterTest(unittest.TestCase):
         props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0))
         hs._auto_face_shrink_center(props, [self._body()])
         self.assertEqual(props.shrink_center, (0.5, 0.0, 0.0))
+
+
+class CleanExportDirTest(unittest.TestCase):
+    """_clean_export_dir removes stale files from a previous export mode."""
+
+    def _make_dir(self):
+        return tempfile.mkdtemp(prefix='hs_clean_')
+
+    def test_removes_stale_export_files_keeps_others(self):
+        d = self._make_dir()
+        for fn in ('Noelle.ini', 'NoelleHead.hlsl',
+                   'NoelleBodyPosition.buf', 'NoelleBodyBase.buf',
+                   'NoelleEyesKey.buf',
+                   'OtherChar.ini', 'OtherCharBodyBase.buf', 'notes.txt'):
+            with open(os.path.join(d, fn), 'w') as f:
+                f.write('x')
+        removed = hs._clean_export_dir(d, 'Noelle')
+        for fn in ('Noelle.ini', 'NoelleHead.hlsl',
+                   'NoelleBodyPosition.buf', 'NoelleBodyBase.buf',
+                   'NoelleEyesKey.buf'):
+            self.assertFalse(os.path.exists(os.path.join(d, fn)), fn)
+        for fn in ('OtherChar.ini', 'OtherCharBodyBase.buf', 'notes.txt'):
+            self.assertTrue(os.path.exists(os.path.join(d, fn)), fn)
+        self.assertEqual(removed, 5)
+
+    def test_missing_files_ignored(self):
+        d = self._make_dir()
+        self.assertEqual(hs._clean_export_dir(d, 'Noelle'), 0)
 
 
 if __name__ == '__main__':
