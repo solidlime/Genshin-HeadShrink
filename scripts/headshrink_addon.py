@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 7, 1),
+    "version": (1, 7, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -1473,12 +1473,6 @@ def _preview_setup_impl(self, context):
     if not src_objs:
         self.report({'ERROR'}, f"No hs_vb0_hash meshes in {DUMP_COLLECTION}")
         return {'CANCELLED'}
-    # Re-apply the saved per-character config (shrink params + units) so a
-    # Preview Setup always restores the last saved state for this char.
-    props = context.scene.headshrink_props
-    cfg = load_char_config(face_offsets_path(), props.char_name.strip())
-    if cfg:
-        apply_char_config(props, cfg)
     # Recreate HS_Preview
     old = bpy.data.collections.get(PREVIEW_COLLECTION)
     if old is not None:
