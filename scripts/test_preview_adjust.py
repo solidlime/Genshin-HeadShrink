@@ -1289,35 +1289,47 @@ class MatchFaceOffsetsTest(unittest.TestCase):
                             for i in range(len(deltas) - 1)))
 
 
-class FaceBBoxMinTest(unittest.TestCase):
-    """_face_bbox_min / _auto_face_shrink_center: 顎ラインへの縮小中心自動設定。"""
+class FaceBBoxCenterTest(unittest.TestCase):
+    """_face_bbox_center / _auto_face_pivot / _auto_face_shrink_center:
+    縮小中心 (pivot) は顔面 bbox 中心、box 中心は上方シフト。"""
 
     def _body(self):
         return _FakeObj('BODY', (0.0, 0.0, 0.0),
                         [(float(i), float(i), float(i)) for i in range(20)])
 
-    def test_face_mesh_returns_yz_min(self):
-        # 配置済み顔メッシュ (loc≠0) の表示空間 (co+loc) y/z 最小を返す
-        body = self._body()
-        face = _FakeObj('EYES', (0.0, 0.2, 0.3),
+    def _face(self):
+        # 表示空間 (co+loc): x 0..0 / y 0.1..0.3 / z 0.3..0.8
+        return _FakeObj('EYES', (0.0, 0.2, 0.3),
                         [(0.0, 0.0, 0.0), (0.0, -0.1, 0.2), (0.0, 0.1, 0.5)])
-        out = hs._face_bbox_min([body, face])
-        self.assertEqual(out, (0.1, 0.3))  # y: 0.2-0.1 / z: 0.3+0.0
+
+    def test_face_mesh_returns_center(self):
+        # 配置済み顔メッシュ (loc≠0) の表示空間 bbox 中心 (x,y,z) を返す
+        out = hs._face_bbox_center([self._body(), self._face()])
+        self.assertEqual(out, (0.0, 0.2, 0.55))  # y: (0.1+0.3)/2 / z: (0.3+0.8)/2
 
     def test_body_only_returns_none(self):
-        self.assertIsNone(hs._face_bbox_min([self._body()]))
+        self.assertIsNone(hs._face_bbox_center([self._body()]))
 
     def test_face_with_zero_loc_excluded(self):
         # loc=(0,0,0) の顔 (未配置のダンプ原位置) は対象外 → None
         face = _FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.4)])
-        self.assertIsNone(hs._face_bbox_min([self._body(), face]))
+        self.assertIsNone(hs._face_bbox_center([self._body(), face]))
+
+    def test_auto_pivot_sets_face_center(self):
+        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
+        hs._auto_face_pivot(props, [self._body(), self._face()])
+        self.assertEqual(props.shrink_origin, (0.0, 0.2, 0.55))
+
+    def test_auto_pivot_no_face_unchanged(self):
+        props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
+        hs._auto_face_pivot(props, [self._body()])
+        self.assertEqual(props.shrink_origin, (0.5, 0.5, 0.5))
 
     def test_auto_center_updates_yz_keeps_x(self):
+        # box 中心: x 維持 / y = 顔 bbox 中心 / z = 顔 bbox 中心 + 0.1 (首を外す)
         props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0))
-        face = _FakeObj('EYES', (0.0, 0.2, 0.3),
-                        [(0.0, 0.0, 0.0), (0.0, -0.1, 0.2)])
-        hs._auto_face_shrink_center(props, [self._body(), face])
-        self.assertEqual(props.shrink_center, (0.5, 0.1, 0.3))
+        hs._auto_face_shrink_center(props, [self._body(), self._face()])
+        self.assertEqual(props.shrink_center, (0.5, 0.2, 0.65))
 
     def test_auto_center_no_face_unchanged(self):
         props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0))

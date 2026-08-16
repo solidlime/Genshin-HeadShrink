@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 7, 4),
+    "version": (1, 7, 5),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -795,7 +795,7 @@ def _preview_props_update(self, context):
     scale = self.shrink_scale
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
-    origin = tuple(self.shrink_center)  # 縮小中心は box 中央に固定
+    origin = tuple(self.shrink_origin)  # 縮小中心 (pivot) は顔面に自動設定
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         preview_shrink_mesh(obj.data, center, half, scale,
@@ -1455,8 +1455,8 @@ def _match_face_offsets(body_mesh, face_objs, initial_locs,
     return out
 
 
-def _face_bbox_min(meshes):
-    """Display-space bbox min (y_min, z_min) over placed face meshes.
+def _face_bbox_center(meshes):
+    """Display-space bbox center (x, y, z) over placed face meshes.
 
     Face mesh = non-BODY (is_body_mesh False) with a non-zero location
     (auto-placed by _preview_setup_impl; unplaced dump copies sit at
@@ -1468,30 +1468,48 @@ def _face_bbox_min(meshes):
               and tuple(o.location) != (0.0, 0.0, 0.0)]
     if not placed:
         return None
-    y_min = z_min = float('inf')
+    mins = [float('inf')] * 3
+    maxs = [-float('inf')] * 3
     for o in placed:
         off = tuple(o.location)
         for v in o.data.vertices:
-            y = v.co[1] + off[1]
-            z = v.co[2] + off[2]
-            if y < y_min:
-                y_min = y
-            if z < z_min:
-                z_min = z
-    return (y_min, z_min)
+            for i in range(3):
+                c = v.co[i] + off[i]
+                if c < mins[i]:
+                    mins[i] = c
+                if c > maxs[i]:
+                    maxs[i] = c
+    return tuple((mins[i] + maxs[i]) / 2.0 for i in range(3))
+
+
+def _auto_face_pivot(props, meshes):
+    """Set shrink_origin (scale pivot) to the face bbox center.
+
+    The pivot controls the scale point, independent of the box: placing it
+    at the face center keeps the face displacement delta =
+    (1-scale)*(pivot-face_pos) small for every face vertex, which is what
+    minimizes mod gaps (CopyDispatch fixed diffs are added after skinning,
+    so drift grows with pivot-face distance). No placed face mesh -> leave
+    shrink_origin untouched.
+    """
+    face_c = _face_bbox_center(meshes)
+    if face_c is not None:
+        props.shrink_origin = face_c
 
 
 def _auto_face_shrink_center(props, meshes):
-    """Set shrink_center y/z to the jaw line (face bbox min); x unchanged.
+    """Set shrink_center so the box covers the head but not the neck.
 
-    No placed face mesh -> leave shrink_center untouched. Called from
-    _preview_setup_impl after face placement so the shrink box (created
-    from props.shrink_center) sits near the jaw: face displacement delta
-    = (1-scale)*(center-face_pos) stays small, avoiding mod gaps.
+    Box = center ± half; with half_z=0.2, centering the box on the face
+    bbox center would let the box bottom reach below the jaw into the
+    neck. Instead shift the center up by 0.1: box z-range ≈
+    [cz-0.1, cz+0.3] for face bbox center z = cz, so the neck below cz
+    stays outside the box and does not get shrunk ("body shrinks" bug).
+    x unchanged, y = face bbox center. No placed face mesh -> untouched.
     """
-    face_min = _face_bbox_min(meshes)
-    if face_min is not None:
-        props.shrink_center = (props.shrink_center[0], face_min[0], face_min[1])
+    face_c = _face_bbox_center(meshes)
+    if face_c is not None:
+        props.shrink_center = (props.shrink_center[0], face_c[1], face_c[2] + 0.1)
 
 
 def _preview_setup_impl(self, context):
@@ -1593,11 +1611,15 @@ def _preview_setup_impl(self, context):
     # Orange wireframe of the shrink box, origin at shrink_center so the
     # user can grab it with G and Apply Box Position reads it back.
     props = context.scene.headshrink_props
-    # 縮小中心を顎ライン付近へ自動設定: 配置済み顔メッシュの表示空間 bbox
-    # 最小 (y,z) を shrink_center に合わせる (x は現状維持)。顔面変位
-    # δ=(1-scale)×(center-face_pos) を小さく保ち、CopyDispatch 固定差分
-    # 加算とスキニングの干渉による隙間を抑える。顔メッシュ無しなら触らない。
-    # HS_ShrinkBox はこの center で作られるため、設定後に呼ぶこと。
+    # 自動設定 (配置済み顔メッシュの表示空間 bbox 基準):
+    # 1) 縮小中心 (pivot = shrink_origin) を顔面 bbox 中心へ → 顔面変位
+    #    δ=(1-scale)×(pivot-face_pos) を最小化し、CopyDispatch 固定差分
+    #    加算とスキニングの干渉による隙間を抑える。
+    # 2) box 中心 (shrink_center) は顔面 bbox 中心 z を 0.1 上へシフト →
+    #    box 下端が首より上になり、「体が小さくなる」問題を回避。
+    # 顔メッシュ無しならどちらも触らない。HS_ShrinkBox はこの center で
+    # 作られるため、設定後に呼ぶこと。
+    _auto_face_pivot(props, preview_objs)
     _auto_face_shrink_center(props, preview_objs)
     _create_shrink_box(coll, tuple(props.shrink_center),
                        tuple(props.shrink_half))
@@ -1674,7 +1696,7 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         scale = props.shrink_scale
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
-        origin = tuple(props.shrink_center)  # 縮小中心は box 中央に固定
+        origin = tuple(props.shrink_origin)  # 縮小中心 (pivot) は顔面に自動設定
         meshes = [o for o in coll.objects if o.type == 'MESH']
         count = 0
         for obj in meshes:
@@ -2077,8 +2099,10 @@ class NHS_PT_Panel(bpy.types.Panel):
                   icon='INFO')
         box.label(text="Save Default: 現在の値を全キャラ共通の基準として保存。"
                        "Load Default: 基準値を現在の設定に適用", icon='INFO')
+        box.prop(props, "shrink_origin")
+        box.label(text="縮小中心 (Pivot): 顔面に自動設定。Box と分離", icon='INFO')
         box.prop(props, "shrink_center")
-        box.label(text="縮小中心は Box 中央に固定", icon='INFO')
+        box.label(text="縮小範囲 (Box): 頭部のみを覆う位置に自動設定", icon='INFO')
         box.prop(props, "shrink_half")
         box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")
@@ -2099,8 +2123,8 @@ class NHS_PT_Panel(bpy.types.Panel):
         row.operator("headshrink.apply_box_position", icon='CHECKMARK')
         box.label(text="Box はワイヤーフレームで表示。G キーで移動 → "
                        "Apply Box Position で反映", icon='INFO')
-        box.label(text="縮小中心はセットアップ時に顎ライン付近へ自動設定 "
-                       "(顔メッシュの下端基準)。隙間が出にくい位置になっている",
+        box.label(text="縮小中心 (Pivot) は顔面 bbox 中心へ、縮小範囲 (Box) は"
+                       "首を外す位置へセットアップ時に自動設定。隙間・体縮みの両方を回避",
                   icon='INFO')
 
         # ---- Step 5: mod 生成 (出力) ----
