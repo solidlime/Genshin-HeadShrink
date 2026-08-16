@@ -1,0 +1,13 @@
+{
+  "index_bytes": 2,
+  "units": [
+    {
+      "name": "Body",
+      "position": "def7af36",
+      "vert_count": 15965,
+      "groups": [
+        {"name": "HEAD", "vertex_range": [0, 4300], "ib_range": [0, 12915]}
+      ]
+    }
+  ]
+}

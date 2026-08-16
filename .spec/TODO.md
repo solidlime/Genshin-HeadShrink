@@ -1,0 +1,78 @@
+# TODO - タスクリスト
+
+## 優先度：高
+- [x] **T001: 3DMigoto .vb/.ib 変換スクリプト `scripts/build_headshrink_mod.py`** — 2026-08-15
+  - [x] position-only modifier (12B/vert のみ touch、stride 残りは素通し)
+  - [x] IB 分割 (match_first_index 境界)
+  - [x] .ini 自動生成 (5 TextureOverride + Resources)
+  - [x] Mona 解析 (stride=40, 13855 verts, 53502 indices)
+  - [x] 6 unit tests + 1 synth integration test 通過
+- [x] T002-a: ゲーム内 dump 取得環境構築 — 2026-08-15
+  - [x] 3DMigoto FrameAnalysis (CTRL+F8) で dump 取得 (選択/装備/図鑑/フィールド 8 回検証)
+  - [x] 顔メッシュ取得: dump_usage=1 変更 + ハンティング (Ctrl+F1/F5/F6/F7 にキー変更) + 図鑑 Details
+  - [x] Noelle 全メッシュ構成確定: 本体 def7af36/9cf0789e + 顔独立 VB 3 (目 63f702ce/0bcb587f, 口 6192fe1c/3049e662, 眉 ddf54429/da7f6805)
+- [x] T002-b: build_headshrink_mod.py 拡張 — 16bit IB + 複数ユニット対応 (Noelle 検証済み構成) — 2026-08-16
+  - [x] units 配列 spec (複数 VB/IB ユニット) + find_dump_hash (フレームダンプ直接読み込み)
+  - [x] to_r32_ib (IB 常時 R32_UINT 変換、Bennett 準拠) + unit 別 blend_stride (実ストライド 20/12)
+  - [x] render_ini を Bennett 実物準拠に修正: [Constants] 1回 + [Present] post $active=0 / Position (vb0置換) / Blend (skip+vb1+draw) / IB (skipのみ) / Group (match_first_index+drawindexed) / VertexLimitRaise 廃止
+- [x] T002-c: headshrink_addon.py 拡張 — ダンプインポート→頂点選択→mod 生成の一気通貫 — 2026-08-16
+  - [x] dump_dir/dump_pair/dump_groups/char_name + 4 Operator (analyze_dump/import_dump/register_group/build_mod)
+  - [x] e2e 検証: Noelle 4 ユニット (目/口/眉/本体) のグループ登録→mod 生成→配置
+- [ ] T002: XXMI-Launcher で mod 適用テスト (ゲーム内確認)
+  - 配置先: G:\XXMI-Launcher-Portable\Mods\Mods\Noelle_HeadShrink\ (U4 本体のみ + ACCESSORY カバー版、HEAD 0.65)
+  - フィールドで頭部縮小 + 小物非消失 + フリーズ/点滅なしを確認
+  - Mods\log.txt (d3dx.ini calls=1 設定済み) で TextureOverride マッチを実証 → 確認後 calls=0 に戻す
+- [ ] T002-d (次回): UI 画面の顔縮小を正規方式で実装
+  - 診断: U1-U3 (顔独立 VB の VB/IB 置換) は非正規パターンで点滅/フリーズの最有力原因 → 現行 mod から除外済み
+  - 正規方式候補: $faceScale+OffsetFace (IB hash 操作) or effieface 方式 (face テクスチャ hash トリガー + cs=Face.hlsl で in-place 変形)
+  - フィールドの顔は U4 HEAD グループ (頂点 0..4300 に顔頂点 0..1082 含む) で縮小済み — UI 画面のみ未対応
+- [x] T003: Blender 実機での addon 動作確認 — 2026-08-15
+  - [x] addon install + import + scale + export 全通過
+  - [x] 4 Blender 5.x 互換性バグ修正 (import keyword, PropertyGroup 移動, EnumProperty default, FloatVectorProperty slice)
+
+- [ ] T010: Eye Box 機能 (瞳の移動/拡縮) — v1.7.0
+  - [ ] HS_EyeBox ワイヤーフレームボックス (ShrinkBox 方式、別色) + 白目 (EYES) bbox 自動配置 + Apply Eye Box Position オペレータ
+  - [ ] eye_box_center / eye_box_half props + Eye Move X/Y/Z + Eye Scale スライダー (Step 4 頭部調整)
+  - [ ] 適用ロジック: プレビュー更新時、BODY メッシュの eye box 内頂点のみ移動/拡縮 (EYES 白目は対象外)
+  - [ ] Save/Load Char Config 対応 + テスト (移動/拡縮の数学検証・eye box 内のみ変形・白目不変・自動配置・ラウンドトリップ)
+
+## 優先度：中
+- [x] T008: ワンクリック自動セットアップ (dump_dir 変更で全自動) — 2026-08-16 (v1.3.0)
+  - [x] dump_dir update コールバック: 有効ディレクトリ変更時のみ auto_setup 実行 (bpy.app.timers 遅延 + 連続発火防止)
+  - [x] NHS_OT_AutoSetup: 既存オブジェクト全削除 → analyze → 自動ペア選択 → import → preview setup
+  - [x] select_import_pairs にゴミペア除外 (>50000 かつ次の非顔サイズの 5 倍超、複数ゴミ対応。911ff708 除外検証済み)
+  - [x] head_center_from_verts に NaN ガード
+  - [x] UI に Auto Setup ボタン追加 (icon=PLAY)
+  - [x] テスト追加 (test_auto_setup_select.py 8 tests) + Blender 実機確認 (実機: 全削除→15ペア import→ゴミ除外→HEAD 判定→Preview Setup 自動実行を確認)
+- [x] T009: ハッシュ直接入力 UI (units 登録) — 2026-08-16 (v1.4.0)
+  - [x] units_vb0/units_role/units_list/units_list_index プロパティ + 4 オペレータ (units_add: 8桁hex検証+大文字正規化+重複role更新 / units_remove / units_save: face_offsets.json の __config__.units のみ更新 / units_load)
+  - [x] Units box UI (Dump Import box 内、template_list 一覧 + 読込/保存/削除ボタン)
+  - [x] units_save → auto_setup の units フィルタ (select_import_pairs units_map) で該当ペアのみインポート (ゲーム取得ハッシュ → 表示 → 調整 → mod化の流れ)
+  - [x] テスト (test_units_ui.py 10 tests) + Blender 実機確認 (add 成功 / 無効ハッシュ拒否 / panel draw OK / インストール済み同期 MD5 3AAB28A9...)
+  - [x] パネルを 4 ステップ構成に再構成 (v1.5.0): ① キャラメッシュ登録 (Units) → ② セットアップ (ダンプ読込) → ③ 頭部調整 (プレビュー) → ④ mod 生成 (出力)。上から順に進めればセットアップ完了
+  - [x] units_add_pair オペレータ追加: analyze_dump 結果のペア選択 → units 登録 (ハッシュ手入力不要の導線)。重複 vb0 は role 更新
+  - [x] import_dump / import_all は UI から削除 (auto_setup が包含。クラス定義は残置、API 破壊なし)
+  - [x] テスト 14+11+136+8+13 = 182 pass + 実機確認 (analyze 100 ペア検出 → units_add_pair 登録/重複更新 OK、draw OK、MD5 5647F2B2694A2A0FC6F5DC64E9EEC007)
+  - [x] v1.5.1: パネル 5 ステップ構成 (① ダンプディレクトリ → ② キャラメッシュ登録 → ③ セットアップ → ④ 頭部調整 → ⑤ mod 生成)。analyze_dump が dump_dir 前提なのに後方にあった配置ミス修正。auto_setup 自動発火は units 登録済み時のみ (未登録なら手動ボタン、_has_registered_units 判定)。テスト 18+11+136+8+13 = 186 pass + 実機リロード確認 (MD5 DB12D38DFFF0C7ED42D9BB7E563E3F76)
+- [ ] T004: bone-aware head shrink (advanced)
+  - Mesh binary parser 自作 (数日〜1週間)
+  - 骨 index/weight 抽出 → head bone scale 0.65
+  - アニメ対応 (bone に scale なので deformer が自動計算)
+- [ ] T005: 全キャラ mesh 抽出の汎用化
+  - `findstr /M /C:"Avatar_Girl_..." 00\*.blk` でキャラ .blk 自動検出
+  - 任意のキャラに対して同じパイプラインを通せるバッチスクリプト
+
+## 優先度：低
+- [ ] T006: MdbComponent パーサ自作 (Nilou mesh 直抽出用)
+  - 02050112.blk 内 MdbComponent 41 個を unwrap
+  - khang06/genshin-studio 削除済み → 自前 reverse engineering 必須
+- [ ] T007: Render Preview のアングル調整
+  - 現状は正面固定 → 任意角度対応（カメラ orbit control）
+
+## 完了済み
+- [x] Oodle 復号パイプライン完成 (1441 Nilou bundles / 88 Mitya bundles OK)
+- [x] Nilou / Mitya / Tighnari mesh 抽出
+- [x] Blender アドオン初版（Nilou 専用）
+- [x] 全キャラ対応化（auto_detect + JSON prefab override） — 2026-08-15
+- [x] 単体テスト scripts/test_headshrink_auto_detect.py — 9 tests pass
+- [x] prefabs/nilou.json, mitya.json, tighnari.json 作成

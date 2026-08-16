@@ -1,0 +1,45 @@
+{
+  "char_name": "Tighnari",
+  "groups": {
+    "HEAD": {
+      "description": "Head area (Face, Brow, Mask)",
+      "names": [
+        "Brow",
+        "Brow_LOD2",
+        "Brow_LOD3",
+        "Face",
+        "Face02",
+        "Face_Eye",
+        "Face_Eye_LOD2",
+        "Face_Eye_LOD3",
+        "Face_LOD2",
+        "Face_LOD3"
+      ]
+    },
+    "BODY": {
+      "description": "Body (torso/limbs, incl. Body_Eye)",
+      "names": [
+        "Body",
+        "Body_LOD1",
+        "Body_LOD2",
+        "Body_LOD3"
+      ]
+    },
+    "EYE": {
+      "description": "Eyes (Pupil, EyeStar)",
+      "names": [
+        "EyeStar"
+      ]
+    },
+    "EFFECT": {
+      "description": "Effects (EffectMesh, EffectHair)",
+      "names": [
+        "EffectHair",
+        "EffectHair_LOD1",
+        "EffectHair_LOD2",
+        "EffectHair_LOD3",
+        "EffectMesh"
+      ]
+    }
+  }
+}

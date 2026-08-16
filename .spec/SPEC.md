@@ -1,0 +1,160 @@
+# SPEC - 技術仕様・要件定義
+
+## 機能要件
+- [x] .blk (Blb3File) → 4段復号 (XOR+AES+RC4+GF256) → Oodle 復号 → Unity serialized
+- [x] OodleLZ_Decompress via oo2core_9_win64.dll (Cdecl 14 args)
+- [x] AnimeStudio CLI で Unity serialized → OBJ 抽出
+- [x] Blender アドオン: 部位別拡縮 + offset スライダー + Render Preview + OBJ 出力
+- [x] 全キャラ対応: auto_detect_groups (prefix-based) + JSON prefab override
+- [x] **3DMigoto .vb/.ib 変換**: `scripts/build_headshrink_mod.py` — dump + scale parameter → mod フォルダ生成 CLI (position-only modifier, stride 素通し)
+- [x] **ワンクリック自動セットアップ** (v1.3.0): dump_dir を有効なディレクトリに変更すると 既存オブジェクト全削除 → 解析 → 自動ペア選択 → インポート → Preview Setup まで自動実行。手動用 Auto Setup ボタンも併設 (2026-08-16)
+  - 発火制御: dump_dir update コールバック `_dump_dir_update` — 有効ディレクトリかつ `_last_auto_setup_dir` と異なる場合のみ `bpy.app.timers` (0.1s 遅延) で `headshrink.auto_setup` 実行。同一パスの連続発火は抑制
+  - `NHS_OT_AutoSetup`: dump_dir 実在チェック → `bpy.data.objects` 全削除 (do_unlink=True) + HeadShrink_Dump/HS_Preview コレクション削除 → scan → ペア選択 → インポート → Preview Setup (共通化 `_preview_setup_impl`)
+  - ゴミペア除外 (select_import_pairs): vert_count 降順ソート走査で「>50000 かつ 次の非顔サイズの 5 倍以上」をゴミとして除外 (除外後にインデックスを戻して再チェック、複数ゴミ対応。Noelle: 911ff708 104857v 除外)。顔サイズ (50..3000) は比較基準にしない。HEAD ロール判定もゴミ除外後の基準
+  - head_center_from_verts は NaN ガード付き (math.isfinite 除外、全滅なら None)
+- [x] **ハッシュ直接入力 UI** (v1.4.0, 2026-08-16): 3DMigoto ハンティングモード等で取得した VB ハッシュを入力 → units 登録 (HEAD/EYES/MOUTH/BROW/OTHER) → `face_offsets.json` の `__config__.units` に保存 → auto_setup / import_all は units 一致ペアのみインポート (units に無い最大ペアは保険で含む)。いくつでも登録可 — フィールドのみならボディ 1 つ、UI 画面も縮めるなら顔パーツ (目/口/眉) も登録
+  - ハッシュ取得方法 (GIMI UsageInstructions より): テンキー 0 でハンティングモード ON → 該当オブジェクトが消えるのでドローを特定 → テンキー 7/8 で IB サイクル・9 でコピー、/ * で VB サイクル・- でコピー。キャラクターメニュー内で実施推奨 (フィールドはオブジェクト過多)
+  - ハッシュ値だけでは顔/ボディを区別できない (頭と体は同じ VB/IB で描画、区別は match_first_index)。顔パーツの独立 VB 有無はキャラの実ダンプで確認が必要
+- [x] **パネル 4 ステップ構成** (v1.5.0, 2026-08-16): 上から順に進めるワークフロー UI — ① キャラメッシュ登録 (analyze_dump → ペア選択 → units_add_pair で登録、または VB ハッシュ直接入力) → ② セットアップ (dump_dir 指定 → auto_setup 自動実行) → ③ 頭部調整 (shrink スライダー群) → ④ mod 生成 (export_diff)。import_dump/import_all は UI から削除 (auto_setup が包含、クラスは残置)
+- [ ] **Eye Box 機能** (v1.7.0, 2026-08-16): 瞳 (BODY メッシュの一部) を Eye Box で範囲指定し、移動/拡縮でスライダー調整
+  - Eye Box (HS_EyeBox): ワイヤーフレームボックス (ShrinkBox 方式、別色で区別)。初期配置は白目 (EYES) の bbox に自動配置 (瞳は白目の中央にあるため)。G キー移動 / S キー拡縮 → Apply Eye Box Position で反映。中心/サイズは props (`eye_box_center` / `eye_box_half`) に保存
+  - スライダー (Step 4 頭部調整): Eye Move X/Y/Z (eye box 内の BODY 頂点を各軸方向に移動) + Eye Scale (eye box 内の BODY 頂点を eye box 中心から均一拡縮)
+  - 適用: プレビュー更新時、BODY メッシュの頂点のうち **eye box 内 (3D bbox 内、x/y/z 全部)** に入るものだけ移動/拡縮。**EYES (白目) は対象外** (瞳は BODY メッシュに含まれる。まぶた・皮膚も eye box 外なので対象外)
+  - eye_sink (凹み) は既存のまま共存
+  - 保存: Save Char Config / Load Char Config で eye box 位置 + スライダー値を保存
+  - mod 出力: プレビュー座標がそのまま Key.buf に反映 (既存仕組み、追加実装なし)
+- [ ] **ゲーム dump 取得**: xxmi-tools / 3dmigoto dump 環境構築 (T002 着手前提)
+- [ ] **.ini 実ゲームでの hash 整合確認**: XXMI-Launcher で mod 適用テスト
+
+## 非機能要件
+- **パフォーマンス**: .blk 41MB 全体を復号しても数十秒以内
+- **互換性**: Blender 5.2.0 LTS / Python 3.12 / Windows
+- **拡張性**: 任意キャラ mesh に対して、JSON 1ファイル追加で対応可能
+
+## 技術構成
+- **言語**: Python 3.12 (scripts/), Blender Python (addon)
+- **主要依存**: lz4, UnityPy 1.25.3, ctypes
+- **外部ツール**: AnimeStudio CLI (`D:\Tools\AnimeStudio\`), Blender 5.2.0, XXMI-Launcher, oo2core_9_win64.dll (RAD Game Tools), 3DMigoto
+- **対象ゲーム**: 原神 (Genshin Impact) — StreamingAssets/AssetBundles/blocks/00/
+
+## パイプライン全体像
+
+```
+[Game StreamingAssets/00/<hash>.blk]
+    ↓ AnimeStudio CLI (Blb v3 → Unity serialized)
+    ↓ UnityPy + oo2core_9_win64.dll (Oodle 復号)
+[抽出 OBJ (Blender プレビュー専用)]
+    ↓
+[Blender アドオン: headshrink_addon.py — 拡縮パラメータ決定]
+    ↓ headshrink_props (FloatVectorProperty size=18)
+[JSON spec: groups / vertex_range / ib_range / target scale]
+    ↓
+[3DMigoto dump (ゲーム起動 + 3DMigoto d3d11 hook)]
+    ↓ Position.buf / IB.ib / Blend.buf / TexCoord.buf / hash.json
+[scripts/build_headshrink_mod.py]
+    ├-- scale positions (only xyz, stride 素通し)
+    ├-- split IB (match_first_index 境界)
+    ├-- generate <Char>.ini (TextureOverride + Resources)
+    ↓
+[Mod folder: DisableIB/<Char>/...]
+    ↓ XXMI-Launcher に配置
+[ゲーム内で head shrink 適用]
+```
+
+### 重要: OBJ はプレビュー専用
+- game dump (Position.buf + IB.ib ペア) が必ず別途必要
+- build_headshrink_mod.py は dump 必須。OBJ → .vb 直接変換は不可 (UV/normals/blendIdx/hash 情報欠落)
+
+## データ構造・インターフェース
+
+### mesh グループ JSON (`scripts/prefabs/<char>.json`)
+```json
+{
+  "char_name": "Nilou",
+  "groups": {
+    "HEAD":  {"description": "head area", "names": ["Face", "Brow", "Mask", ...]},
+    "BODY":  {"description": "body",      "names": ["Body", "Body_LOD1", ...]},
+    "EYE":   {"description": "eyes",      "names": ["Pupil", "EyeStar"]},
+    "BANG":  {"description": "front fringe", "names": ["Bang", "Bang_LOD1", ...]},
+    "EFFECT":{"description": "effects",   "names": ["EffectMesh", "EffectHair"]}
+  }
+}
+```
+
+### groups_spec.json (build_headshrink_mod 用, 複数ユニット対応)
+```json
+{
+  "index_bytes": 2,
+  "units": [
+    {
+      "name": "Body",                     // ユニット名 (空=メイン)。ファイル名接頭辞に使う
+      "position": "def7af36",             // ダンプ vb0 ハッシュ
+      "ib": "9cf0789e",                   // ダンプ ib ハッシュ
+      "vert_count": 15965,
+      "groups": [
+        {"name":"Head", "vertex_range":[0, 4299],     "ib_range":[0, 12915]},
+        {"name":"Body", "vertex_range":[4299, 15965], "ib_range":[12915, 50502]}
+      ]
+    },
+    {
+      "name": "Eyes",                     // 顔独立 VB (UI 画面用)
+      "position": "63f702ce",
+      "ib": "0bcb587f",
+      "vert_count": 1083,
+      "groups": [
+        {"name":"Head", "vertex_range":[0, 1083], "ib_range":[0, 4290]}
+      ]
+    }
+  ]
+}
+```
+- 旧形式 (単一 unit: `vert_count` + `groups` 直下) は後方互換で受け付ける
+- `index_bytes` 2=16bit / 4=32bit。実ダンプは 16bit (R16_UINT) が標準
+- `--scale HEAD=0.65` は全ユニットの同名グループに適用 (顔も一緒に縮む)
+
+### dump ディレクトリ (build_headshrink_mod 入力, フレームダンプ直接対応)
+- フレームダンプ形式 (`NNNNNN-vb0=<hash>-vs=...-ps=....buf`) から
+  `NNNNNN-vb0=<hash>` / `NNNNNN-ib=<hash>` で該当フレームを検索して読む
+- `hash.json` — `{position, ib, blend, texcoord, vertex_limit}` game-internal hashes
+  (フレームダンプ時はファイル名のハッシュから自動導出、実体指定も可)
+
+### Blender アドオン UI (NHSProps)
+- `mesh_dir: StringProperty (DIR_PATH)`
+- `output_dir: StringProperty (DIR_PATH)`
+- `prefab_name: EnumProperty (Auto / Nilou / Mitya / Tighnari)`
+- `group_scales: FloatVectorProperty (size=18, 6 groups × XYZ)`
+- `group_offsets: FloatVectorProperty (size=18)`
+
+### 3DMigoto 出力 (build_headshrink_mod 実装済, Bennett 準拠構造)
+- `<Char><Unit>Position.buf` — vertex buffer (40B/vert 原神標準、position 12B のみ scale)
+- `<Char><Unit>Blend.buf` — bone weights (passthrough, unit 別 blend_stride: 本体 20B / 顔 12B)
+- `<Char><Unit><Group>.ib` — group 分割 IB (**常時 R32_UINT 変換**, to_r32_ib)
+- `<Char>.ini` — Bennett 実物 (GameBanana 674758) 準拠:
+  - `[Constants] global $active = 0` (1回, 先頭) + `[Present] post $active = 0` (末尾)
+  - 各ユニット: Position (hash=vb0, vb0=Resource, $active=1) / Blend (hash=vb1, handling=skip, vb1=Resource, draw=vert_count,0) / IB (hash=ib, handling=skip のみ) / 各 Group (hash=ib, match_first_index, ib=Resource, drawindexed=count,0,0)
+  - Resources: Position stride=40 / Blend stride=unit別 / IB format=DXGI_FORMAT_R32_UINT
+  - **VertexLimitRaise は生成しない** (vb0 と同一 hash にするとフリーズ。正規は draw_vb の別 hash が必要なため)
+
+### 重要な診断結果 (2026-08-16, 3 症状: 点滅/アニメ破綻/UI フリーズ)
+- **顔独立 VB (U1-U3) の VB/IB 置換はコミュニティに前例のない非正規パターン**。動作実績 mod は全て「体のみ VB/IB 置換、顔はテクスチャ差し替え or CopyDispatch HLSL」
+- 顔 hash はキャラ間共有 → 他キャラの顔ドローに誤マッチして点滅/破綻
+- UI 画面は同じ IB を細切れドロー+アニメで使用 → match_first_index=0 前提の置換が衝突してフリーズ
+- **現行 mod は U4 (本体) のみで構成**: HEAD (頭部髪+顔頂点 0..4300) / BODY / ACCESSORY (小物カバー)
+  - フィールドの顔は U4 HEAD グループに含まれる頂点 0..1082 で縮小済み
+  - UI 画面の顔縮小は未対応 (正規方式は後日 T002-d で検討: $faceScale+OffsetFace or effieface 方式)
+- **グループ未定義の IB 範囲は skip されたまま再発行されず消失する** (小物消失) → アドオンが `fill_uncovered_accessories()` で自動補完 (ACCESSORY/ACCESSORY2...)
+- デバッグ: `Mods\d3dx.ini` [Logging] calls=1 で `Mods\log.txt` に TextureOverride マッチ記録。調査後 calls=0 に戻す
+
+## Noelle 実ダンプ構成 (2026-08-15 検証済み, FrameAnalysis-2026-08-15-222105)
+
+| パーツ | VB hash | IB hash | 頂点数 | 備考 |
+|--------|---------|---------|--------|------|
+| 本体 (頭髪+体+小物) | def7af36 | 9cf0789e | 15965 | IB 3分割 [0:12915)=頭部髪 / [12915:47910)=体 / [47910:50502)=小物 |
+| 目周り (UI用独立) | 63f702ce | 0bcb587f | 1083 | stride 40, ic=4290, start=0 base=0 |
+| 口周り (UI用独立) | 6192fe1c | 3049e662 | 877 | stride 40, ic=4014, start=0 base=0 |
+| 眉 (UI用独立) | ddf54429 | da7f6805 | 56 | stride 40, ic=156, start=0 base=0 |
+
+- 全 IB 16bit (R16_UINT)。ドローは全て start=0 base=0 で全 index 使用
+- フィールドでは顔 IB (0bcb587f/3049e662) が本体統合 VB def7af36 の先頭頂点 (0..1082/0..876) を参照して描画 → **統合 VB の頭部頂点縮小でフィールドの顔も一緒に縮む**
+- UI 画面 (選択/装備/図鑑) は独立 VB を使用 → 顔パーツの TextureOverride を別途生成する必要あり
+- 顔 3 パーツの縮小 = 全頂点縮小 (全て頭部領域) なので scale のみ適用、IB 分割不要

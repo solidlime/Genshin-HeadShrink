@@ -1,0 +1,50 @@
+{
+  "index_bytes": 2,
+  "units": [
+    {
+      "name": "U1",
+      "position": "63f702ce",
+      "ib": "0bcb587f",
+      "blend": "a51badce",
+      "vert_count": 1083,
+      "blend_stride": 12,
+      "groups": [
+        {"name": "HEAD", "vertex_range": [0, 1083], "ib_range": [0, 4290]}
+      ]
+    },
+    {
+      "name": "U2",
+      "position": "6192fe1c",
+      "ib": "3049e662",
+      "blend": "b89c1c6d",
+      "vert_count": 877,
+      "blend_stride": 12,
+      "groups": [
+        {"name": "HEAD", "vertex_range": [0, 877], "ib_range": [0, 4014]}
+      ]
+    },
+    {
+      "name": "U3",
+      "position": "ddf54429",
+      "ib": "da7f6805",
+      "blend": "7b8bf01d",
+      "vert_count": 56,
+      "blend_stride": 12,
+      "groups": [
+        {"name": "HEAD", "vertex_range": [0, 56], "ib_range": [0, 156]}
+      ]
+    },
+    {
+      "name": "U4",
+      "position": "def7af36",
+      "ib": "9cf0789e",
+      "blend": "8f1eff2c",
+      "vert_count": 15965,
+      "blend_stride": 20,
+      "groups": [
+        {"name": "HEAD", "vertex_range": [0, 4300], "ib_range": [0, 12915]},
+        {"name": "BODY", "vertex_range": [4299, 15237], "ib_range": [12915, 47910]}
+      ]
+    }
+  ]
+}

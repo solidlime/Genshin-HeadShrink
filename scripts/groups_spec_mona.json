@@ -1,0 +1,10 @@
+{
+  "char": "Mona",
+  "vert_count": 13855,
+  "blend_stride": 32,
+  "texcoord_stride": 12,
+  "groups": [
+    {"name": "Head", "vertex_range": [0, 4000],   "ib_range": [0, 17688]},
+    {"name": "Body", "vertex_range": [4000, 13855], "ib_range": [17688, 53502]}
+  ]
+}
