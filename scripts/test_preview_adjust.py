@@ -1191,26 +1191,52 @@ class SelectionDisplayBBoxTest(unittest.TestCase):
 
 
 class FaceBBoxYMinTest(unittest.TestCase):
-    """_face_bbox_y_min: 顔メッシュ (BODY 以外・loc != 0) の表示空間 y 最小値。"""
+    """_face_bbox_min: 顔メッシュ (BODY 以外・loc != 0) の表示空間 (y, z) 最小値。"""
 
     def test_face_mesh_min_y(self):
-        # EYES loc=(0,-0.1,0.3): 表示空間 y = 0.4-0.1 = 0.3 / -0.5-0.1 = -0.6
+        # EYES loc=(0,-0.1,0.3):
+        #   表示空間 y = 0.4-0.1 = 0.3 / -0.5-0.1 = -0.6 → min -0.6
+        #   表示空間 z = 0.9+0.3 = 1.2 / 0.2+0.3 = 0.5 → min 0.5
         objs = [
             _FakeObj('BODY', (0.0, 0.0, 0.0),
                      [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
             _FakeObj('EYES', (0.0, -0.1, 0.3),
                      [(0.0, 0.4, 0.9), (0.0, -0.5, 0.2)]),
         ]
-        self.assertEqual(hs._face_bbox_y_min(objs), -0.6)
+        self.assertEqual(hs._face_bbox_min(objs), (-0.6, 0.5))
 
     def test_body_only_returns_none(self):
         objs = [_FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.4, 0.9)])]
-        self.assertIsNone(hs._face_bbox_y_min(objs))
+        self.assertIsNone(hs._face_bbox_min(objs))
 
     def test_face_at_origin_excluded(self):
         # loc == (0,0,0) の顔メッシュは対象外 (body に重なる配置のため)
         objs = [_FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.2)])]
-        self.assertIsNone(hs._face_bbox_y_min(objs))
+        self.assertIsNone(hs._face_bbox_min(objs))
+
+    def test_min_axes_from_different_meshes(self):
+        # y 最小 (EYES) と z 最小 (MOUTH) が別メッシュから来ても個別に最小
+        objs = [
+            _FakeObj('EYES', (0.0, 0.0, 0.1),
+                     [(0.0, -0.5, 1.2)]),   # y=-0.5, z=1.3
+            _FakeObj('MOUTH', (0.0, 0.1, 0.3),
+                     [(0.0, 0.4, 0.02)]),   # y=0.5, z=0.32
+        ]
+        self.assertEqual(hs._face_bbox_min(objs), (-0.5, 0.32))
+
+    def test_multiple_faces_global_min(self):
+        # 3 メッシュ全体での最小 (MOUTH が y/z 両方の最小)
+        objs = [
+            _FakeObj('EYES', (0.0, -0.1, 0.3),
+                     [(0.0, 0.4, 0.9)]),    # y=0.3, z=1.2
+            _FakeObj('MOUTH', (0.0, 0.05, 0.1),
+                     [(0.0, -0.3, 0.02)]),  # y=-0.25, z=0.12
+            _FakeObj('BROW', (0.0, 0.1, 0.2),
+                     [(0.0, 0.2, 1.5)]),    # y=0.3, z=1.7
+        ]
+        y_min, z_min = hs._face_bbox_min(objs)
+        self.assertAlmostEqual(y_min, -0.25)
+        self.assertAlmostEqual(z_min, 0.12)
 
 
 if __name__ == '__main__':

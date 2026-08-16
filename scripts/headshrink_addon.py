@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 6, 8),
+    "version": (1, 6, 9),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -1398,10 +1398,12 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _face_bbox_y_min(preview_objs):
-    """顔メッシュ群 (BODY 以外、loc != 0) の表示空間 bbox の y 最小値。
+def _face_bbox_min(preview_objs):
+    """顔メッシュ群 (BODY 以外、loc != 0) の表示空間 bbox の (y, z) 最小値。
 
-    顎のライン対策: 縮小中心 (shrink_origin.y) の自動設定に使う。
+    顎のライン対策: 縮小中心 (shrink_origin) の自動設定に使う。顔メッシュ
+    の表示空間 bbox (v.co + obj.location) の y 最小値 (顎のライン) と
+    z 最小値 (首/顎の高さ) を返し、body と顔メッシュの相対ズレを防ぐ。
     該当メッシュが無ければ None を返す (現状値維持)。
     """
     face_objs = [o for o in preview_objs
@@ -1410,8 +1412,10 @@ def _face_bbox_y_min(preview_objs):
                  and len(o.data.vertices) > 0]
     if not face_objs:
         return None
-    return min(v.co[1] + o.location[1]
-               for o in face_objs for v in o.data.vertices)
+    return (min(v.co[1] + o.location[1]
+                for o in face_objs for v in o.data.vertices),
+            min(v.co[2] + o.location[2]
+                for o in face_objs for v in o.data.vertices))
 
 
 def _preview_setup_impl(self, context):
@@ -1481,13 +1485,15 @@ def _preview_setup_impl(self, context):
         for o in preview_objs:
             if o.name in saved:
                 o.location = tuple(saved[o.name])
-        # 顎ライン対策: 顔メッシュ群 (BODY 以外) の表示空間 bbox の y 最小値
-        # (顎のライン) を shrink_origin.y に自動設定 (x/z は現状値維持)。
-        # プレビューセットアップのたびに実行し、UI で後から変更可能。
-        y_min = _face_bbox_y_min(preview_objs)
-        if y_min is not None:
+        # 顎ライン対策: 顔メッシュ群 (BODY 以外) の表示空間 bbox の
+        # (y, z) 最小値 (顎のライン + 首/顎の高さ) を shrink_origin に
+        # 自動設定 (x は現状値維持)。プレビューセットアップのたびに実行
+        # し、UI で後から変更可能。
+        origin_min = _face_bbox_min(preview_objs)
+        if origin_min is not None:
+            y_min, z_min = origin_min
             _origin = tuple(props.shrink_origin)
-            props.shrink_origin = (_origin[0], y_min, _origin[2])
+            props.shrink_origin = (_origin[0], y_min, z_min)
         # Record the final placement (after auto-placement + saved offsets)
         # so Reset Preview can restore G-key moved faces to the setup-time
         # position. Stored per-vertex (POINT domain) like hs_original_pos;
