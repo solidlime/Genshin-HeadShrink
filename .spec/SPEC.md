@@ -157,6 +157,7 @@
   - v1.7.3: 顔メッシュは常に全頂点変形に固定 (face_full_transform チェック廃止)
 - 確認済み事実: CopyDispatch + base/key は正規方式 (effieface/Bennett 実物と HLSL 同一)。Noelle 4 ユニットの頂点数は IB と完全一致 (Reorder 不要)
 - **残課題 (未解決)**: ゲーム内での隙間が完全には消えていない。候補は ① DCR (Dynamic Character Resolution) 有効 (GIMI Issue #364 公式認定の freaky geometry、無効化確認が次の一手) ② フィールドの隙間 = box 境界の段差 (顎が box 縁付近) ③ UI 画面 = 頭部回転ドリフト + カットシーン用第 2 ハッシュ不足 + diffuse ガードなし。詳細は KNOWLEDGE.md「CopyDispatch 顔変形の正規ワークフロー」参照
+- v1.7.4 (2026-08-17): 縮小中心を顎ラインに自動設定 (_auto_face_shrink_center、auto_setup 時に顔メッシュ bbox 下端へ) + falloff 0.3。ゲーム確認で「これまでで一番マシ」まで改善。残る僅かな隙間は center 微調整で詰める方向
 
 ## Noelle 実ダンプ構成 (2026-08-15 検証済み, FrameAnalysis-2026-08-15-222105)
 
