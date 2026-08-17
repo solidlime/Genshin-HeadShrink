@@ -41,7 +41,10 @@
   - [x] 正規方式検証: CopyDispatch+base/key は effieface/Bennett 実物と同一 (HLSL 動的縮小は撤回)
   - [x] 頂点数検証: Noelle 4 ユニット全て IB と一致 (Reorder points 不要)
   - [x] 原因確定: 隙間 ∝ 顔面変位 (1−scale)×(縮小中心−顔面位置)。CopyDispatch 固定差分がスキニング後位置に加算されるため、中心が顔面から離れるほどスキニングドリフトで隙間。ok mod が隙間なしだったのは中心が首/顎付近だったため (box 中央固定 v1.7.1 が失敗の始まり)
-  - [x] v1.7.4: 縮小中心を顎ラインに自動設定 (_auto_face_shrink_center, auto_setup 時に顔メッシュ bbox 下端へ) + falloff デフォルト 0.15→0.3。ゲーム確認「これまでで一番マシ」まで改善 (DCR はユーザー側で無効済み)
+  - [x] v1.8.0: ベネット式 VB 置換 export モード (export_mode=VB_REPLACE): BODY はダンプ vb0 の position のみ差し替えた Position.buf 出力 (normal/tangent 維持) + ini の vb0=Resource 置換。顔は CopyDispatch のまま (ハイブリッド)。v1.8.1: export 時の旧ファイル掃除 (_clean_export_dir)
+  - [x] v1.9.0: position_vb 自動対応付け: scan_dump_dir が pointlist パス (vs=653c63ba4a73ca8b) の vb0 を position_vb として認識 (position_vs プロパティ変更可)、頂点数一致で BODY の import/プレビュー/縮小/export を position_vb ベースに切替 (毎フレーム再スキニング = アニメ追従 + 隙間ゼロの原理。draw_vb 置換はアニメ静止の原因と確定)
+  - [x] v1.9.1: position_vb 座標変換修正 (position_vb_to_display = (-lx, -lz, +ly) / 逆変換 display_to_position_vb = (-dx, +dz, -dy)) — y-up モデルローカル → display z-up。横倒し解消 (実機で直立表示確認)
+  - [ ] 残課題: ゲーム内でアニメ追従 + 隙間ゼロを確認 (v1.9.x mod はゲーム確認待ち) / UI 画面 = 顔独立 VB は CopyDispatch のまま (回転ドリフト + 第2ハッシュ + diffuse ガードは未着手) / プレビューで顔メッシュ (draw_vb 空間) が直立 BODY に重ならない表示問題
   - [ ] 残課題: ゲーム内隙間がまだ僅かに残る可能性 — 完全ゼロに向けた微調整 (center の微調整 or 顔メッシュ個別中心) / UI 画面 = 頭部回転ドリフト + カットシーン用第 2 ハッシュ + diffuse ガード (未着手)
   - [x] v1.8.0: ベネット方式完全模倣 — BODY ユニット = VB 置換 (Position.buf: ダンプ vb0 の position のみ差し替え、normal/tangent 維持。スキニングはゲーム VS が行うのでアニメ完全追従 = 隙間ゼロの原理) + 顔ユニット = CopyDispatch のまま (ベネットと同じハイブリッド)。export_mode (VB_REPLACE default / COPY_DISPATCH legacy)。Position.buf == Blender v.co (display_to_game) 完全一致検証済み
   - [x] v1.8.1: export 時に旧出力ファイル掃除 (_clean_export_dir、<char> プレフィックス限定、他キャラ/手動ファイルは残す)。実機確認済み (残骸 2 ファイル削除)

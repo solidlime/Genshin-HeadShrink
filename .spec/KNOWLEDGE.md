@@ -75,3 +75,5 @@ blk header (28B)
 - **Blender MCP での report({'ERROR'}) は RuntimeError として伝播** (実機 GUI ではステータスバー表示のみで中断しない)。MCP 経由の検証コードでは無効入力のオペレータ呼び出しが例外で止まる点に注意
 - **NHS_PT_panel は poll 未定義** (常時表示)。draw 検証は MockLayout + SimpleNamespace(scene=...) で可能
 - **隙間 ∝ 顔面変位 (1−scale)×(縮小中心−顔面位置)**: CopyDispatch 固定差分はスキニング後位置に加算されるため、中心が顔面から離れるほどスキニングドリフトで隙間。ok mod が隙間なしだったのは中心が首/顎付近 (顔面に近い) だったから。対策 = 縮小中心を顔面に近づける (v1.7.4 で顎ライン自動設定、ゲーム確認「これまでで一番マシ」)。Bennett の縮小ピボットも頭部表面近傍 = 同じ思想
+- **原神の描画は 2 段階**: ① pointlist スキニングパス (専用 VS 653c63ba4a73ca8b、vb0=position_vb 静的 + vb1=blend_vb、非インデックス) が毎フレームスキニングして描画用バッファ (draw_vb) に書き出し ② レンダーパスが draw_vb を描画。**ハンティングで見える hash は 99% draw_vb (ポーズ後) — 置換するとアニメ静止。置換すべきは position_vb (スキニング前静的)**。position_vb はフレームダンプに自動で含まれる (ファイル名の vs=653c63ba4a73ca8b で識別)
+- **座標系**: position_vb = y-up モデルローカル (x 左右 / y 高さ / z 前後)、draw_vb = x-down ゲーム空間 (上 = -x)。position_vb → display = (-lx, -lz, +ly)、逆変換 = (-dx, +dz, -dy)。ベネットの 4 オーバーライド (Position/Blend/Texcoord/VertexLimitRaise) は XXMI 公式テンプレートの標準構成 (Genshin Impact.ini.j2)。blend メッシュは 64k 頂点制限付近だと VertexLimitRaise が必要
