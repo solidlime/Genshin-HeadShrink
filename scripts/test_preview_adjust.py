@@ -1418,15 +1418,24 @@ class FaceBBoxCenterTest(unittest.TestCase):
         self.assertIsNone(hs._face_bbox_center([self._body(), face]))
 
     def test_auto_pivot_sets_body_head_center(self):
-        # BODY 頭部 bbox 中心 (16,16,16) が pivot になる (顔基準ではない)
+        # pivot = 頭部 bbox の下端 (z_min = center.z - half.z = 16-3 = 13)
         props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
         hs._auto_face_pivot(props, [self._body(), self._face()])
-        self.assertEqual(props.shrink_origin, (16.0, 16.0, 16.0))
+        self.assertEqual(props.shrink_origin, (16.0, 16.0, 13.0))
 
     def test_auto_pivot_body_only_sets_head(self):
         props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
         hs._auto_face_pivot(props, [self._body()])
-        self.assertEqual(props.shrink_origin, (16.0, 16.0, 16.0))
+        self.assertEqual(props.shrink_origin, (16.0, 16.0, 13.0))
+
+    def test_auto_pivot_z_is_head_bbox_bottom(self):
+        # 明示検証: pivot z = 頭部 bbox の z_min (首との境界)
+        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
+        hs._auto_face_pivot(props, [self._body()])
+        center, half = hs._body_head_bbox([self._body()])
+        self.assertEqual(props.shrink_origin[2], center[2] - half[2])
+        self.assertEqual(props.shrink_origin[0], center[0])
+        self.assertEqual(props.shrink_origin[1], center[1])
 
     def test_auto_pivot_single_face_treated_as_body(self):
         # is_body_mesh は最大頂点数で判定: 単一メッシュは BODY 扱い → 頭部基準

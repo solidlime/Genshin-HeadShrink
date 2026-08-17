@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 9, 2),
+    "version": (1, 9, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -933,7 +933,7 @@ def _preview_props_update(self, context):
     scale = self.shrink_scale
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
-    origin = tuple(self.shrink_origin)  # 縮小中心 (pivot) は BODY 頭部に自動設定
+    origin = tuple(self.shrink_origin)  # 縮小中心 (pivot) は頭部付け根に自動設定
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         preview_shrink_mesh(obj.data, center, half, scale,
@@ -1726,19 +1726,22 @@ def _body_head_bbox(meshes, head_fraction=0.35):
 
 
 def _auto_face_pivot(props, meshes):
-    """Set shrink_origin (scale pivot) to the BODY head bbox center.
+    """Set shrink_origin (scale pivot) to the BODY head bbox bottom edge.
 
-    The pivot controls the scale point, independent of the box: placing it
-    at the head center keeps the displacement delta = (1-scale)*(pivot-pos)
-    small for every head vertex, which is what minimizes mod gaps
-    (CopyDispatch fixed diffs are added after skinning, so drift grows with
-    pivot-vertex distance). BODY head is the position_vb-space head region;
+    The pivot controls the scale point, independent of the box. Placing it
+    at the head bbox bottom (z_min, the neck boundary) makes the head
+    shrink toward the neck: falloff-band vertices (neck) sit right at the
+    pivot, so their displacement ~ (1-scale)*(pivot-pos) ~ 0 and nothing
+    gets pushed outward. A pivot at the head center instead pulls the neck
+    up toward the head (visible "pushed neck" artifact). x/y stay at the
+    head bbox center. BODY head is the position_vb-space head region;
     falls back to the face-mesh bbox center when no BODY mesh exists.
     No candidate -> leave shrink_origin untouched.
     """
     head = _body_head_bbox(meshes)
     if head is not None:
-        props.shrink_origin = head[0]
+        center, half = head
+        props.shrink_origin = (center[0], center[1], center[2] - half[2])
         return
     face_c = _face_bbox_center(meshes)
     if face_c is not None:
@@ -1948,7 +1951,7 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         scale = props.shrink_scale
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
-        origin = tuple(props.shrink_origin)  # 縮小中心 (pivot) は BODY 頭部に自動設定
+        origin = tuple(props.shrink_origin)  # 縮小中心 (pivot) は頭部付け根に自動設定
         meshes = [o for o in coll.objects if o.type == 'MESH']
         count = 0
         for obj in meshes:
@@ -2400,7 +2403,8 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.label(text="Save Default: 現在の値を全キャラ共通の基準として保存。"
                        "Load Default: 基準値を現在の設定に適用", icon='INFO')
         box.prop(props, "shrink_origin")
-        box.label(text="縮小中心 (Pivot): BODY 頭部に自動設定。Box と分離", icon='INFO')
+        box.label(text="縮小中心 (Pivot): 頭部の付け根 (首との境界) に自動設定。Box と分離",
+                  icon='INFO')
         box.prop(props, "shrink_center")
         box.label(text="縮小範囲 (Box): BODY 頭部を覆う位置に自動設定", icon='INFO')
         box.prop(props, "shrink_half")
@@ -2423,7 +2427,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         row.operator("headshrink.apply_box_position", icon='CHECKMARK')
         box.label(text="Box はワイヤーフレームで表示。G キーで移動 → "
                        "Apply Box Position で反映", icon='INFO')
-        box.label(text="縮小中心 (Pivot) は BODY 頭部 bbox 中心へ、縮小範囲 (Box) は"
+        box.label(text="縮小中心 (Pivot) は頭部 bbox の下端 (首との境界) へ、縮小範囲 (Box) は"
                        "BODY 頭部を覆う大きさへセットアップ時に自動設定。"
                        "隙間・体縮みの両方を回避",
                   icon='INFO')
