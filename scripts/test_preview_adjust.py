@@ -924,12 +924,12 @@ class CharConfigTest(unittest.TestCase):
     def _config(self):
         return {
             'shrink_center': [-0.3, 0.0, 0.0],
-            'shrink_origin': [0.0, 0.0, 0.5],
             'shrink_half': [0.5, 0.25, 0.35],
             'shrink_scale': 0.9,
             'shrink_falloff': 0.15,
             'shrink_shift': [0.0, 0.0, 0.0],
             'face_full_transform': True,
+            'face_offset': [0.0, 0.0, 0.0],
             'units': {'63f702ce': 'EYES', '6192fe1c': 'MOUTH'},
         }
 
@@ -993,20 +993,17 @@ class CharConfigTest(unittest.TestCase):
 
     def test_extract_char_config(self):
         props = types.SimpleNamespace(
-            shrink_center=(0.1, 0.2, 0.3), shrink_origin=(0.0, 0.0, 0.5),
+            shrink_center=(0.1, 0.2, 0.3),
             shrink_half=(0.5, 0.25, 0.35), shrink_scale=0.88,
             shrink_falloff=0.2, shrink_shift=(0.0, 0.0, 0.0),
             face_full_transform=False,
-            eye_sink=0.005, eye_sink_pad=0.01,
-            eye_region_min=(0.037, 0.382, -0.1),
-            eye_region_max=(0.057, 0.444, 0.1),
+            face_offset=(0.01, 0.02, 0.03),
         )
         cfg = hs.extract_char_config(props)
         self.assertEqual(cfg['shrink_center'], [0.1, 0.2, 0.3])
         self.assertEqual(cfg['shrink_scale'], 0.88)
         self.assertFalse(cfg['face_full_transform'])
-        self.assertEqual(cfg['eye_region_min'], [0.037, 0.382, -0.1])
-        self.assertEqual(cfg['eye_region_max'], [0.057, 0.444, 0.1])
+        self.assertEqual(cfg['face_offset'], [0.01, 0.02, 0.03])
 
     def test_apply_char_config_partial(self):
         props = types.SimpleNamespace(
@@ -1119,83 +1116,8 @@ class SelectImportTest(unittest.TestCase):
 
 
 
-class EyeSinkTest(unittest.TestCase):
-    """eye_sink_positions sinks head verts in the eyes region back along x."""
-
-    # Noelle-measured eyes bbox (display coords, location-inclusive)
-    BBOX = ((-0.0983, 0.0076, 0.3867), (0.0579, 0.0704, 0.4866))
-    PAD = 0.01
-    SINK = 0.005
-
-    def test_inside_region_moves_negative_x(self):
-        p = (0.03, 0.04, 0.45)  # inside y/z bbox, x <= bmax.x + pad
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0], (p[0] - self.SINK, p[1], p[2]))
-
-    def test_outside_y_unchanged(self):
-        p = (0.03, 0.2, 0.45)  # y far above bbox
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0], p)
-
-    def test_outside_z_unchanged(self):
-        p = (0.03, 0.04, 0.8)  # z far above bbox
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0], p)
-
-    def test_beyond_x_max_unchanged(self):
-        p = (0.2, 0.04, 0.45)  # x > bmax.x + pad
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0], p)
-
-    def test_x_at_boundary_is_included(self):
-        p = (self.BBOX[1][0] + self.PAD, 0.04, 0.45)  # x == bmax.x + pad
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0], (p[0] - self.SINK, p[1], p[2]))
-
-    def test_pad_widens_region(self):
-        # y just outside bbox but inside bbox+pad: moved with pad, kept with 0
-        p = (0.03, 0.075, 0.45)  # bmax.y=0.0704, pad=0.01 -> 0.0804
-        out = hs.eye_sink_positions([p], [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0][0], p[0] - self.SINK)
-        out0 = hs.eye_sink_positions([p], [self.BBOX], 0.0, self.SINK)
-        self.assertEqual(out0[0], p)
-
-    def test_zero_sink_keeps_all(self):
-        verts = [(0.03, 0.04, 0.45), (0.2, 0.2, 0.2), (-1.0, -1.0, -1.0)]
-        out = hs.eye_sink_positions(verts, [self.BBOX], self.PAD, 0.0)
-        self.assertEqual(out, verts)
-
-    def test_mixed_verts(self):
-        verts = [(0.03, 0.04, 0.45), (0.2, 0.2, 0.2), (-0.05, 0.03, 0.40)]
-        out = hs.eye_sink_positions(verts, [self.BBOX], self.PAD, self.SINK)
-        self.assertEqual(out[0][0], verts[0][0] - self.SINK)
-        self.assertEqual(out[1], verts[1])
-        self.assertEqual(out[2][0], verts[2][0] - self.SINK)
-
-    def test_multi_bbox_any_match(self):
-        # second bbox covers the vert the first one misses
-        other = ((0.2, 0.2, 0.7), (0.3, 0.3, 0.8))
-        verts = [(0.25, 0.25, 0.75), (0.03, 0.04, 0.45)]
-        out = hs.eye_sink_positions(verts, [self.BBOX, other], self.PAD,
-                                    self.SINK)
-        self.assertEqual(out[0][0], verts[0][0] - self.SINK)
-        self.assertEqual(out[1][0], verts[1][0] - self.SINK)
-
-    def test_multi_bbox_miss_all_unchanged(self):
-        other = ((0.5, 0.5, 0.7), (0.6, 0.6, 0.8))
-        p = (0.7, 0.55, 0.75)  # x beyond both bbox x_max + pad
-        out = hs.eye_sink_positions([p], [self.BBOX, other], self.PAD,
-                                    self.SINK)
-        self.assertEqual(out[0], p)
-
-    def test_empty_bboxes_unchanged(self):
-        p = (0.03, 0.04, 0.45)
-        out = hs.eye_sink_positions([p], [], self.PAD, self.SINK)
-        self.assertEqual(out[0], p)
-
-
 class _FakeObj:
-    """Minimal bpy object stand-in for eye_region_bboxes tests."""
+    """Minimal bpy object stand-in for mesh-object tests."""
 
     def __init__(self, role, location, verts, vb0=None):
         self.type = 'MESH'
@@ -1212,109 +1134,6 @@ class _FakeObj:
         if key == 'hs_vb0_hash':
             return self._vb0 if self._vb0 is not None else default
         return default
-
-
-class EyeRegionBBoxesTest(unittest.TestCase):
-    """eye_region_bboxes collects display-space bboxes of EYES-role meshes."""
-
-    def test_no_eyes_returns_empty(self):
-        objs = [_FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.0, 0.0)]),
-                _FakeObj('MOUTH', (0.0, 0.0, 0.0), [(0.0, 0.0, 0.0)])]
-        self.assertEqual(hs.eye_region_bboxes(objs), [])
-
-    def test_empty_mesh_list(self):
-        self.assertEqual(hs.eye_region_bboxes([]), [])
-
-    def test_single_eyes_bbox(self):
-        objs = [_FakeObj('EYES', (0.1, 0.2, 0.3),
-                         [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0)])]
-        boxes = hs.eye_region_bboxes(objs)
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0],
-                         ((0.1, 0.2, 0.3), (1.1, 2.2, 3.3)))
-
-    def test_eyes_location_included(self):
-        # negative coords + positive location -> min from coords+loc
-        objs = [_FakeObj('EYES', (-0.5, 0.0, 0.0),
-                         [(-0.1, -0.2, -0.3), (0.1, 0.2, 0.3)])]
-        boxes = hs.eye_region_bboxes(objs)
-        self.assertEqual(boxes[0],
-                         ((-0.6, -0.2, -0.3), (-0.4, 0.2, 0.3)))
-
-    def test_skips_non_eyes_roles(self):
-        objs = [_FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.0, 0.0)]),
-                _FakeObj('EYES', (0.0, 0.0, 0.0), [(1.0, 1.0, 1.0)]),
-                _FakeObj('BROW', (0.0, 0.0, 0.0), [(2.0, 2.0, 2.0)])]
-        boxes = hs.eye_region_bboxes(objs)
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0], ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)))
-
-    def test_multiple_eyes_returns_multiple_bboxes(self):
-        objs = [_FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, 0.0, 0.0)]),
-                _FakeObj('EYES', (0.0, 0.0, 0.0), [(5.0, 5.0, 5.0)])]
-        boxes = hs.eye_region_bboxes(objs)
-        self.assertEqual(len(boxes), 2)
-
-    def test_empty_eyes_mesh_skipped(self):
-        objs = [_FakeObj('EYES', (0.0, 0.0, 0.0), [])]
-        self.assertEqual(hs.eye_region_bboxes(objs), [])
-
-
-class ResolveEyeBBoxesTest(unittest.TestCase):
-    """resolve_eye_bboxes: a user-set region overrides the automatic EYES bboxes."""
-
-    AUTO = [((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
-            ((2.0, 2.0, 2.0), (3.0, 3.0, 3.0))]
-
-    def test_unset_returns_auto(self):
-        self.assertEqual(hs.resolve_eye_bboxes(self.AUTO, (0, 0, 0), (0, 0, 0)),
-                         self.AUTO)
-
-    def test_set_returns_single_override(self):
-        out = hs.resolve_eye_bboxes(self.AUTO, (0.1, 0.2, 0.3), (1.1, 2.2, 3.3))
-        self.assertEqual(out, [((0.1, 0.2, 0.3), (1.1, 2.2, 3.3))])
-
-    def test_none_returns_auto(self):
-        self.assertEqual(hs.resolve_eye_bboxes(self.AUTO, None, None),
-                         self.AUTO)
-
-    def test_mixed_none_returns_auto(self):
-        # a half-set region is treated as unset (defensive: never half-applied)
-        self.assertEqual(hs.resolve_eye_bboxes(self.AUTO, None, (1.0, 1.0, 1.0)),
-                         self.AUTO)
-        self.assertEqual(hs.resolve_eye_bboxes(self.AUTO, (0.0, 0.0, 0.0), None),
-                         self.AUTO)
-
-    def test_empty_auto_list(self):
-        self.assertEqual(hs.resolve_eye_bboxes([], (0.1, 0.2, 0.3),
-                                               (1.1, 2.2, 3.3)),
-                         [((0.1, 0.2, 0.3), (1.1, 2.2, 3.3))])
-
-
-class SelectionDisplayBBoxTest(unittest.TestCase):
-    """selection_display_bbox computes display-space bbox of chosen verts."""
-
-    def test_selected_verts_only(self):
-        mesh = _FakeObj('BODY', (0.0, 0.0, 0.0),
-                        [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0),
-                         (4.0, 5.0, 6.0)]).data
-        out = hs.selection_display_bbox(mesh, [0, 2], (0.0, 0.0, 0.0))
-        self.assertEqual(out, ((0.0, 0.0, 0.0), (4.0, 5.0, 6.0)))
-
-    def test_offset_included(self):
-        mesh = _FakeObj('BODY', (0.0, 0.0, 0.0),
-                        [(-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)]).data
-        out = hs.selection_display_bbox(mesh, [0, 1], (10.0, 0.5, -0.5))
-        self.assertEqual(out, ((9.0, -0.5, -1.5), (11.0, 1.5, 0.5)))
-
-    def test_empty_returns_none(self):
-        mesh = _FakeObj('BODY', (0.0, 0.0, 0.0), [(0.0, 0.0, 0.0)]).data
-        self.assertIsNone(hs.selection_display_bbox(mesh, [], (0.0, 0.0, 0.0)))
-
-    def test_single_vert(self):
-        mesh = _FakeObj('BODY', (0.0, 0.0, 0.0), [(2.0, 3.0, 4.0)]).data
-        out = hs.selection_display_bbox(mesh, [0], (0.0, 0.0, 0.0))
-        self.assertEqual(out, ((2.0, 3.0, 4.0), (2.0, 3.0, 4.0)))
 
 
 class MatchFaceOffsetsTest(unittest.TestCase):
@@ -1726,6 +1545,190 @@ class FaceMeshCenterTest(unittest.TestCase):
         mesh = _FakeMesh([])
         self.assertIsNone(hs._face_mesh_center(
             types.SimpleNamespace(data=mesh, location=(0.0, 0.0, 0.0))))
+
+
+class FaceShrinkPivotTest(unittest.TestCase):
+    """_face_shrink_pivot: box 中央を hs_face_origin 基準で顔ローカル変換。"""
+
+    def _obj(self, loc, origin):
+        return types.SimpleNamespace(
+            location=loc,
+            get=lambda key, default=None: origin
+            if key == 'hs_face_origin' else default)
+
+    def test_pivot_is_box_center_when_not_moved(self):
+        # 配置位置 (hs_face_origin) のままなら pivot (表示空間) = box 中央
+        origin = (1.0, 2.0, 3.0)
+        center = (2.0, 3.0, 4.0)
+        self.assertEqual(hs._face_shrink_pivot(self._obj(origin, origin), center),
+                         center)
+
+    def test_pivot_follows_moved_face(self):
+        # G キーで動かしてもローカル pivot = center - hs_face_origin は不変
+        origin = (1.0, 2.0, 3.0)
+        loc = (9.0, 9.0, 9.0)
+        center = (2.0, 3.0, 4.0)
+        pivot = hs._face_shrink_pivot(self._obj(loc, origin), center)
+        self.assertEqual(pivot, (10.0, 10.0, 10.0))  # center - origin + loc
+        local = tuple(pivot[i] - loc[i] for i in range(3))
+        self.assertEqual(local, (1.0, 1.0, 1.0))  # center - origin
+
+    def test_fallback_to_face_mesh_center(self):
+        # hs_face_origin 無し → 従来の表示空間 bbox 中心
+        mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=(1.0, 2.0, 3.0))
+        obj = types.SimpleNamespace(
+            data=mesh, location=(1.0, 2.0, 3.0),
+            get=lambda key, default=None: default)
+        self.assertEqual(hs._face_shrink_pivot(obj, (0.0, 0.0, 0.0)),
+                         (2.0, 3.0, 4.0))
+
+    def test_shrink_result_loc_independent(self):
+        # 同じ縮小を loc=origin / loc=別値 で適用 → v.co は同一
+        def apply_at(loc, origin):
+            mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
+            obj = self._obj(loc, origin)
+            obj.data = mesh
+            pivot = hs._face_shrink_pivot(obj, (2.0, 3.0, 4.0))
+            hs.preview_shrink_mesh(mesh, pivot, (1.0, 1.0, 1.0), 0.5,
+                                   loc, 0.0, (0.0, 0.0, 0.0), True, pivot)
+            return [tuple(v.co) for v in mesh.vertices]
+
+        origin = (1.0, 2.0, 3.0)
+        co_a = apply_at(origin, origin)
+        co_b = apply_at((9.0, 9.0, 9.0), origin)
+        self.assertEqual(co_a, co_b)
+        # ローカル pivot = center - origin = (1,1,1) へ半分寄る
+        self.assertEqual(co_a, [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
+
+
+class FaceOffsetApplyTest(unittest.TestCase):
+    """face_offset: 顔メッシュの v.co に加算、BODY には適用されない。"""
+
+    def _run_update(self, body_mesh, face_mesh, face_offset):
+        body = types.SimpleNamespace(
+            type='MESH', data=body_mesh, location=(0.0, 0.0, 0.0),
+            get=lambda key, default=None: default)
+        face = types.SimpleNamespace(
+            type='MESH', data=face_mesh, location=(0.0, 0.0, 0.0),
+            get=lambda key, default=None: (0.0, 0.0, 0.0)
+            if key == 'hs_face_origin' else default)
+        hs.bpy.context.mode = 'OBJECT'
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: (types.SimpleNamespace(objects=[body, face])
+                              if name == 'HS_Preview' else None))
+        saved = hs._sync_shrink_box
+        hs._sync_shrink_box = lambda *a, **k: None
+        try:
+            props = types.SimpleNamespace(
+                shrink_center=(1.0, 1.0, 1.0), shrink_half=(1.0, 1.0, 1.0),
+                shrink_scale=0.5, shrink_falloff=0.0,
+                shrink_shift=(0.0, 0.0, 0.0), face_offset=face_offset)
+            hs._preview_props_update(props, None)
+        finally:
+            hs._sync_shrink_box = saved
+        return body_mesh, face_mesh
+
+    def test_face_offset_applied_to_face_only(self):
+        body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
+        body_mesh, face_mesh = self._run_update(
+            body_mesh, face_mesh, (0.1, 0.2, 0.3))
+        # BODY: 縮小のみ (face_offset 非適用)
+        self.assertEqual([tuple(v.co) for v in body_mesh.vertices],
+                         [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
+        # 顔: 縮小 (0.5,0.5,0.5) + face_offset (0.1,0.2,0.3)
+        self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
+                         [(0.6, 0.7, 0.8)])
+
+    def test_zero_face_offset_no_change(self):
+        body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
+        body_mesh, face_mesh = self._run_update(
+            body_mesh, face_mesh, (0.0, 0.0, 0.0))
+        self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
+                         [(0.5, 0.5, 0.5)])
+
+
+class FaceOriginSaveTest(unittest.TestCase):
+    """_preview_setup_impl: 顔メッシュ (main 以外) に hs_face_origin を保存。"""
+
+    def test_face_origin_saved_for_non_main(self):
+        class _Mesh:
+            def __init__(self, n, co):
+                self.vertices = [types.SimpleNamespace(co=co)] * n
+                self._attrs = {}
+            def copy(self):
+                return _Mesh(len(self.vertices), tuple(self.vertices[0].co))
+            def update(self):
+                pass
+            @property
+            def attributes(self):
+                return self
+            def new(self, name, type, domain):
+                self._attrs[name] = types.SimpleNamespace(
+                    data=types.SimpleNamespace(foreach_set=lambda *a: None))
+                return self._attrs[name]
+
+        class _Obj:
+            def __init__(self, name, n, role, co):
+                self.name = name
+                self.type = 'MESH'
+                self.location = [0.0, 0.0, 0.0]
+                self.rotation_euler = [0.0, 0.0, 0.0]
+                self.scale = [1.0, 1.0, 1.0]
+                self.data = _Mesh(n, co)
+                self._props = {'hs_vb0_hash': name, 'hs_role': role}
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+            def __getitem__(self, key):
+                return self._props[key]
+            def __setitem__(self, key, value):
+                self._props[key] = value
+
+        class _ObjList(list):
+            def link(self, obj):
+                self.append(obj)
+
+        body = _Obj('Dump_body', 100, 'BODY', (0.0, 0.0, 0.0))
+        eyes = _Obj('Dump_eyes', 50, 'EYES', (1.0, 1.0, 1.0))
+        src = types.SimpleNamespace(objects=[body, eyes])
+        coll = types.SimpleNamespace(objects=_ObjList())
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: src if name == 'HeadShrink_Dump' else None,
+            new=lambda name: coll)
+        hs.bpy.data.objects = types.SimpleNamespace(
+            new=lambda name, mesh: _Obj(name, len(mesh.vertices), 'OTHER',
+                                        tuple(mesh.vertices[0].co)))
+        context = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                collection=types.SimpleNamespace(
+                    children=types.SimpleNamespace(link=lambda c: None)),
+                headshrink_props=types.SimpleNamespace(
+                    shrink_center=(0.0, 0.0, 0.0),
+                    shrink_half=(1.0, 1.0, 1.0),
+                    char_name='Noelle')),
+            screen=None)
+        op = types.SimpleNamespace(report=lambda level, msg: None)
+        saved = (hs.load_face_offsets, hs._match_face_offsets,
+                 hs._auto_face_shrink_center, hs._create_shrink_box)
+        hs.load_face_offsets = lambda *a, **k: {}
+        hs._match_face_offsets = lambda *a, **k: {}
+        hs._auto_face_shrink_center = lambda *a, **k: None
+        hs._create_shrink_box = lambda *a, **k: None
+        try:
+            result = hs._preview_setup_impl(op, context)
+        finally:
+            (hs.load_face_offsets, hs._match_face_offsets,
+             hs._auto_face_shrink_center, hs._create_shrink_box) = saved
+        self.assertEqual(result, {'FINISHED'})
+        # コピーされた HS_Preview 側のオブジェクトを確認する
+        copied = {o.name: o for o in coll.objects}
+        # 顔メッシュ: 配置位置 (-1,-1,-1) が hs_face_origin に保存される
+        self.assertEqual(copied['Dump_eyes']['hs_face_origin'],
+                         (-1.0, -1.0, -1.0))
+        self.assertEqual(tuple(copied['Dump_eyes'].location), (-1.0, -1.0, -1.0))
+        # BODY (main) には保存しない
+        self.assertNotIn('hs_face_origin', copied['Dump_body']._props)
 
 
 class BoxCenterPivotTest(unittest.TestCase):

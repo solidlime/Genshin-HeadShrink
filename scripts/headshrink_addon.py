@@ -280,97 +280,6 @@ def in_shrink_box(pos, center, half):
     return all(abs(pos[i] - center[i]) <= half[i] for i in range(3))
 
 
-def eye_region_bboxes(meshes):
-    """Display-space bboxes of every EYES-role mesh in a mesh object list.
-
-    meshes: sequence of bpy mesh objects (HS_Preview objects). Each EYES-role
-    mesh (obj.get('hs_role') == 'EYES') contributes one bbox
-    ((min_x, min_y, min_z), (max_x, max_y, max_z)) computed from display
-    coords (v.co + obj.location; scale/rotation assumed identity). Returns []
-    when no EYES-role mesh is present.
-    """
-    boxes = []
-    for obj in meshes:
-        if not (obj.type == 'MESH' and obj.get('hs_role') == 'EYES'):
-            continue
-        loc = tuple(obj.location)
-        verts = [(v.co[0] + loc[0], v.co[1] + loc[1], v.co[2] + loc[2])
-                 for v in obj.data.vertices]
-        if not verts:
-            continue
-        bmin = tuple(min(c[i] for c in verts) for i in range(3))
-        bmax = tuple(max(c[i] for c in verts) for i in range(3))
-        boxes.append((bmin, bmax))
-    return boxes
-
-
-def eye_sink_positions(verts, eye_bboxes, pad, sink):
-    """Sink head verts in the eyes region back along x (display coords).
-
-    verts: sequence of display-space positions (Vector or 3-sequence).
-    eye_bboxes: list of (bmin, bmax) bboxes (display space, location-
-    inclusive). A vert is in the region when, for at least one bbox,
-    y in [bmin.y-pad, bmax.y+pad] and z in [bmin.z-pad, bmax.z+pad] and
-    x <= bmax.x+pad. In-region verts move to (x - sink, y, z); everything
-    else is unchanged. sink <= 0 short-circuits to the input unchanged
-    (fast path). Returns a new list; never mutates the input.
-    """
-    if sink <= 0.0 or not verts or not eye_bboxes:
-        return list(verts)
-    ranges = []
-    for bmin, bmax in eye_bboxes:
-        ranges.append((bmin[1] - pad, bmax[1] + pad,
-                       bmin[2] - pad, bmax[2] + pad,
-                       bmax[0] + pad))
-    out = []
-    for p in verts:
-        hit = False
-        for y0, y1, z0, z1, x_max in ranges:
-            if y0 <= p[1] <= y1 and z0 <= p[2] <= z1 and p[0] <= x_max:
-                hit = True
-                break
-        if hit:
-            out.append((p[0] - sink, p[1], p[2]))
-        else:
-            out.append(p)
-    return out
-
-
-def resolve_eye_bboxes(eye_bboxes, region_min, region_max):
-    """Pick the eye-region bbox list: user override or automatic detection.
-
-    A user-set region (both eye_region_min and eye_region_max non-zero, i.e.
-    neither is all-zeros) wins over the automatic EYES-mesh bboxes and is
-    returned as a single-bbox list. When either endpoint is None or both are
-    (0,0,0), the automatic list is returned unchanged. Never mutates input.
-    """
-    if region_min is None or region_max is None:
-        return eye_bboxes
-    if not any(region_min) and not any(region_max):
-        return eye_bboxes
-    return [(tuple(region_min), tuple(region_max))]
-
-
-def selection_display_bbox(mesh, vert_indices, offset):
-    """Display-space bbox ((bmin, bmax)) of the chosen mesh vertices.
-
-    mesh: object with a .vertices sequence (bpy mesh or test stub); each
-    selected vertex's local co is offset by 'offset' (object location) to
-    match eye_region_bboxes()'s display-space convention. Returns None for
-    an empty selection.
-    """
-    idx = list(vert_indices)
-    if not idx:
-        return None
-    loc = tuple(offset)
-    verts = [(mesh.vertices[i].co[0] + loc[0],
-              mesh.vertices[i].co[1] + loc[1],
-              mesh.vertices[i].co[2] + loc[2]) for i in idx]
-    bmin = tuple(min(c[j] for c in verts) for j in range(3))
-    bmax = tuple(max(c[j] for c in verts) for j in range(3))
-    return (bmin, bmax)
-
-
 def shrink_positions(verts, center, half, scale, falloff=0.0,
                      shift=(0.0, 0.0, 0.0), all_verts=False, origin=None):
     """[(x,y,z)...] -> [(x',y',z')...] with a smooth boundary fade.
@@ -740,16 +649,12 @@ def extract_char_config(props):
     """
     return {
         'shrink_center': [float(v) for v in props.shrink_center],
-        'shrink_origin': [float(v) for v in props.shrink_origin],
         'shrink_half': [float(v) for v in props.shrink_half],
         'shrink_scale': float(props.shrink_scale),
         'shrink_falloff': float(props.shrink_falloff),
         'shrink_shift': [float(v) for v in props.shrink_shift],
         'face_full_transform': bool(props.face_full_transform),
-        'eye_sink': float(props.eye_sink),
-        'eye_sink_pad': float(props.eye_sink_pad),
-        'eye_region_min': [float(v) for v in props.eye_region_min],
-        'eye_region_max': [float(v) for v in props.eye_region_max],
+        'face_offset': [float(v) for v in props.face_offset],
     }
 
 
@@ -881,36 +786,6 @@ def _create_shrink_box(coll, center, half):
     return obj
 
 
-def _apply_eye_sink(coll, eye_sink, eye_sink_pad, region_min=None,
-                    region_max=None):
-    """Sink BODY-role verts in the eyes region back along x (display space).
-
-    Region comes from resolve_eye_bboxes(): the user-set eye_region_min/max
-    bbox when provided (non-zero), otherwise eye_region_bboxes()'s automatic
-    display-space bbox of every EYES-role mesh (location-inclusive).
-    BODY-role verts whose display y/z fall inside any bbox +/- pad and
-    x <= bmax.x + pad move back by 'eye_sink'. Non-accumulating: it runs
-    after preview_shrink_mesh, which recomputes from hs_original_pos, so the
-    sink is re-applied to the fresh shrink result every pass (never stacked).
-    """
-    if eye_sink <= 0.0:
-        return
-    meshes = [o for o in coll.objects
-              if o.type == 'MESH' and o.get('hs_role')]
-    boxes = resolve_eye_bboxes(eye_region_bboxes(meshes),
-                               region_min, region_max)
-    if not boxes:
-        return
-    for head in [o for o in meshes if o.get('hs_role') == 'BODY']:
-        loc = tuple(head.location)
-        verts = [(v.co[0] + loc[0], v.co[1] + loc[1], v.co[2] + loc[2])
-                 for v in head.data.vertices]
-        moved = eye_sink_positions(verts, boxes, eye_sink_pad, eye_sink)
-        for v, p in zip(head.data.vertices, moved):
-            v.co = (p[0] - loc[0], p[1] - loc[1], p[2] - loc[2])
-        head.data.update()
-
-
 def _preview_props_update(self, context):
     """Live-apply shrink params to HS_Preview meshes (no-op when unavailable).
 
@@ -941,14 +816,13 @@ def _preview_props_update(self, context):
                                 tuple(obj.location), falloff, shift,
                                 False, center)
         else:
-            # 顔メッシュ: 全頂点変形、縮小中心 = 顔メッシュ自身の中心
-            fc = _face_mesh_center(obj)
-            if fc is not None:
-                preview_shrink_mesh(obj.data, fc, half, scale,
+            # 顔メッシュ: 全頂点変形、pivot = box 中央 (hs_face_origin 基準)
+            pivot = _face_shrink_pivot(obj, center)
+            if pivot is not None:
+                preview_shrink_mesh(obj.data, pivot, half, scale,
                                     tuple(obj.location), falloff, shift,
-                                    True, fc)
-    _apply_eye_sink(coll, self.eye_sink, self.eye_sink_pad,
-                    self.eye_region_min, self.eye_region_max)
+                                    True, pivot)
+                _apply_face_offset(obj, tuple(self.face_offset))
     _sync_shrink_box(center, half)
 
 
@@ -1186,16 +1060,6 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         size=3, default=(-0.3, 0.0, 0.0), subtype='XYZ',
         update=_preview_props_update,
     )
-    shrink_origin: bpy.props.FloatVectorProperty(
-        name="Shrink Origin",
-        description="Scale pivot of the shrink in display coords (z = up). "
-                    "Put it at the neck / rotation center: the head shrinks "
-                    "toward this point instead of the box center. Independent "
-                    "of Shrink Center: moving the box does not change the "
-                    "pivot, so face meshes do not follow the box",
-        size=3, default=(0.0, 0.0, 0.5), subtype='TRANSLATION',
-        update=_preview_props_update,
-    )
     shrink_half: bpy.props.FloatVectorProperty(
         name="Shrink Box Half-Size",
         description="Half-extents of the shrink box along x/y/z (display coords, z = up)",
@@ -1234,42 +1098,12 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         default=True,
         update=_preview_props_update,
     )
-    eye_sink: bpy.props.FloatProperty(
-        name="Eye Sink",
-        description="Push the head mesh's eye region (the y/z footprint of "
-                    "the eyes mesh, or the user-set eye region from 'Use "
-                    "Selection as Eye Region') back along x (display coords) "
-                    "by this amount. Counteracts the pupil poking out in "
-                    "front of the eyelids during blinking / expression "
-                    "morphs, which the static CopyDispatch diff cannot "
-                    "follow. 0 disables",
-        default=0.0, min=0.0, max=0.05, step=0.001, precision=4,
-        unit='LENGTH', update=_preview_props_update,
-    )
-    eye_sink_pad: bpy.props.FloatProperty(
-        name="Eye Sink Padding",
-        description="Extra margin around the eyes mesh bbox (y/z, and x "
-                    "front limit) used to select the head vertices that Eye "
-                    "Sink moves. Larger = a wider, smoother sink region",
-        default=0.01, min=0.0, max=0.05, step=0.001, precision=4,
-        unit='LENGTH', update=_preview_props_update,
-    )
-    eye_region_min: bpy.props.FloatVectorProperty(
-        name="Eye Region Min",
-        description="User-set eye region bbox minimum (display coords). "
-                    "Overrides the automatic EYES-mesh detection for Eye "
-                    "Sink. (0,0,0) = unset, use automatic detection. Set via "
-                    "'Use Selection as Eye Region' in Edit mode",
-        size=3, subtype='TRANSLATION', default=(0.0, 0.0, 0.0),
-        update=_preview_props_update,
-    )
-    eye_region_max: bpy.props.FloatVectorProperty(
-        name="Eye Region Max",
-        description="User-set eye region bbox maximum (display coords). "
-                    "Overrides the automatic EYES-mesh detection for Eye "
-                    "Sink. (0,0,0) = unset, use automatic detection. Set via "
-                    "'Use Selection as Eye Region' in Edit mode",
-        size=3, subtype='TRANSLATION', default=(0.0, 0.0, 0.0),
+    face_offset: bpy.props.FloatVectorProperty(
+        name="Face Offset",
+        description="顔メッシュ (目/口/眉) の頂点に加算する平行移動 (display 空間)。"
+                    "export の display_to_game でゲーム座標に反映される。"
+                    "BODY には適用されない",
+        size=3, default=(0.0, 0.0, 0.0), subtype='TRANSLATION',
         update=_preview_props_update,
     )
 
@@ -1783,6 +1617,37 @@ def _face_mesh_center(mesh):
     return tuple((mins[i] + maxs[i]) / 2.0 for i in range(3))
 
 
+def _face_shrink_pivot(obj, center):
+    """顔メッシュ縮小の pivot (表示空間) を返す。
+
+    hs_face_origin (配置時の obj.location) があれば、box 中央を顔ローカル
+    空間に変換 (center - origin) してから現在の配置位置で表示空間に戻す
+    (center - origin + obj.location)。配置位置が変わってもローカル pivot は
+    不変なので export (v.co のみ使用) と分離できる。配置位置のままなら
+    pivot == center (BODY と同じ box 中央)。hs_face_origin が無い場合は
+    従来どおり _face_mesh_center (表示空間 bbox 中心) にフォールバック。
+    """
+    origin = obj.get('hs_face_origin')
+    if origin is not None:
+        return tuple(center[i] - origin[i] + obj.location[i]
+                     for i in range(3))
+    return _face_mesh_center(obj)
+
+
+def _apply_face_offset(obj, offset):
+    """顔メッシュの v.co に face_offset を加算 (display 空間、export に反映)。
+
+    BODY には適用しない (呼び出し側で顔メッシュのみに呼ぶ)。全ゼロなら
+    何もしない (無駄な頂点走査を避ける)。preview_shrink_mesh の後に呼ぶ
+    ことで、縮小結果に平行移動を重ねる (非累積)。
+    """
+    if not any(offset):
+        return
+    for v in obj.data.vertices:
+        v.co = (v.co[0] + offset[0], v.co[1] + offset[1],
+                v.co[2] + offset[2])
+
+
 def _body_head_bbox(meshes, head_fraction=0.35):
     """Display-space bbox (center, half) of the BODY mesh's head region.
 
@@ -1958,6 +1823,12 @@ def _preview_setup_impl(self, context):
             attr = o.data.attributes.new(
                 name='hs_original_loc', type='FLOAT_VECTOR', domain='POINT')
             attr.data.foreach_set('vector', list(loc) * len(o.data.vertices))
+            # 顔メッシュ (main 以外) は配置位置を hs_face_origin として保存。
+            # 縮小 pivot は box 中央をこの原点基準で顔ローカル空間に変換して
+            # 使う (_face_shrink_pivot)。G キーで動かしてもローカル pivot は
+            # 不変のため export (v.co のみ) と分離できる。
+            if o is not main:
+                o['hs_face_origin'] = tuple(o.location)
     # Solid display in any 3D viewport
     if context.screen:
         for area in context.screen.areas:
@@ -2064,90 +1935,15 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
                                        False, center):
                     count += 1
             else:
-                # 顔メッシュ: 全頂点変形、縮小中心 = 顔メッシュ自身の中心
-                fc = _face_mesh_center(obj)
-                if fc is not None and preview_shrink_mesh(
-                        obj.data, fc, half, scale, tuple(obj.location),
-                        falloff, shift, True, fc):
+                # 顔メッシュ: 全頂点変形、pivot = box 中央 (hs_face_origin 基準)
+                pivot = _face_shrink_pivot(obj, center)
+                if pivot is not None and preview_shrink_mesh(
+                        obj.data, pivot, half, scale, tuple(obj.location),
+                        falloff, shift, True, pivot):
                     count += 1
-        _apply_eye_sink(coll, props.eye_sink, props.eye_sink_pad,
-                        props.eye_region_min, props.eye_region_max)
+                    _apply_face_offset(obj, tuple(props.face_offset))
         self.report({'INFO'}, f"Preview shrink applied to {count} mesh(es) "
                               f"(scale={scale:.3f})")
-        return {'FINISHED'}
-
-
-class NHS_OT_SetEyeRegion(bpy.types.Operator):
-    bl_idname = "headshrink.set_eye_region"
-    bl_label = "Use Selection as Eye Region"
-    bl_description = "Set the Eye Sink region from the selected BODY-mesh " \
-                     "vertices (Edit mode)"
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return (obj is not None and obj.type == 'MESH'
-                and obj.get('hs_role') == 'BODY'
-                and context.mode == 'EDIT_MESH')
-
-    def execute(self, context):
-        obj = context.active_object
-        if (obj is None or obj.type != 'MESH'
-                or obj.get('hs_role') != 'BODY'
-                or context.mode != 'EDIT_MESH'):
-            self.report({'ERROR'},
-                        "Select eye-region vertices in EDIT mode on the BODY mesh")
-            return {'CANCELLED'}
-        import bmesh
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.verts.ensure_lookup_table()
-        sel = [v.index for v in bm.verts if v.select]
-        if not sel:
-            self.report({'ERROR'},
-                        "No vertices selected: select the eye region on the "
-                        "BODY mesh in Edit mode")
-            return {'CANCELLED'}
-        bbox = selection_display_bbox(obj.data, sel, obj.location)
-        if bbox is None:
-            self.report({'ERROR'}, "Empty eye region bbox")
-            return {'CANCELLED'}
-        # Leave edit mode before assigning props: the update callback
-        # (_preview_props_update) reads hs_original_pos via the data API,
-        # which bmesh owns while in EDIT_MESH (reads as length 0). Assigning
-        # in OBJECT mode makes the preview re-apply safely, then edit mode is
-        # restored (vertex selection is kept in the mesh data).
-        props = context.scene.headshrink_props
-        prev_mode = bpy.context.mode
-        if prev_mode == 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='OBJECT')
-        props.eye_region_min = bbox[0]
-        props.eye_region_max = bbox[1]
-        if prev_mode == 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-        self.report({'INFO'}, f"Eye region set from {len(sel)} vertices: "
-                              f"{tuple(round(v, 4) for v in bbox[0])} .. "
-                              f"{tuple(round(v, 4) for v in bbox[1])}")
-        return {'FINISHED'}
-
-
-class NHS_OT_ClearEyeRegion(bpy.types.Operator):
-    bl_idname = "headshrink.clear_eye_region"
-    bl_label = "Clear Eye Region"
-    bl_description = "Reset the Eye Sink region to automatic EYES-mesh detection"
-
-    def execute(self, context):
-        props = context.scene.headshrink_props
-        # Same edit-mode detour as NHS_OT_SetEyeRegion: props assignment
-        # triggers _preview_props_update, which needs the data API.
-        prev_mode = bpy.context.mode
-        if prev_mode == 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='OBJECT')
-        props.eye_region_min = (0.0, 0.0, 0.0)
-        props.eye_region_max = (0.0, 0.0, 0.0)
-        if prev_mode == 'EDIT_MESH':
-            bpy.ops.object.mode_set(mode='EDIT')
-        self.report({'INFO'},
-                    "Eye region cleared: automatic detection restored")
         return {'FINISHED'}
 
 
@@ -2518,17 +2314,9 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")
         box.prop(props, "shrink_shift")
-        box.prop(props, "eye_sink")
-        box.prop(props, "eye_sink_pad")
-        row = box.row()
-        row.operator("headshrink.set_eye_region", icon='RESTRICT_SELECT_OFF')
-        row.operator("headshrink.clear_eye_region", icon='X')
-        box.label(text="瞳領域: 自動判定 (EYES メッシュ位置基準)。Edit モードで瞳の頂点を選択 → "
-                       "Use Selection で上書き。Clear で自動判定に戻る",
-                  icon='INFO')
-        box.label(text="Eye Sink: Body メッシュの目領域のみ (自動判定 or 選択指定) を"
-                       "後ろに凹ませ、モーフ中の黒目浮きを相殺",
-                  icon='INFO')
+        box.prop(props, "face_offset")
+        box.label(text="Face Offset: 顔メッシュ (目/口/眉) の頂点を表示空間で平行移動。"
+                       "export に反映される (BODY には適用されない)", icon='INFO')
         row = box.row()
         row.operator("headshrink.center_on_head", icon='TRACKER')
         row.operator("headshrink.apply_box_position", icon='CHECKMARK')
@@ -2576,8 +2364,6 @@ classes = (
     NHS_OT_SetRole,
     NHS_OT_ApplyBoxPosition,
     NHS_OT_CenterOnHead,
-    NHS_OT_SetEyeRegion,
-    NHS_OT_ClearEyeRegion,
     NHS_PT_Panel,
 )
 
