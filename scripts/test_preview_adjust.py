@@ -1392,9 +1392,10 @@ class MatchFaceOffsetsTest(unittest.TestCase):
 
 class FaceBBoxCenterTest(unittest.TestCase):
     """_face_bbox_center / _auto_face_pivot / _auto_face_shrink_center:
-    縮小中心 (pivot) は顔面 bbox 中心、box 中心は上方シフト。"""
+    v1.9.2 以降は BODY 頭部 (position_vb 空間) 基準。BODY 無しは顔基準フォールバック。"""
 
     def _body(self):
+        # BODY: z 0..19 の 20 頂点。頭部 (上位 35%) = z >= 6.65 → 頂点 7..19
         return _FakeObj('BODY', (0.0, 0.0, 0.0),
                         [(float(i), float(i), float(i)) for i in range(20)])
 
@@ -1416,26 +1417,92 @@ class FaceBBoxCenterTest(unittest.TestCase):
         face = _FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.4)])
         self.assertIsNone(hs._face_bbox_center([self._body(), face]))
 
-    def test_auto_pivot_sets_face_center(self):
+    def test_auto_pivot_sets_body_head_center(self):
+        # BODY 頭部 bbox 中心 (16,16,16) が pivot になる (顔基準ではない)
         props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
         hs._auto_face_pivot(props, [self._body(), self._face()])
-        self.assertEqual(props.shrink_origin, (0.0, 0.2, 0.55))
+        self.assertEqual(props.shrink_origin, (16.0, 16.0, 16.0))
 
-    def test_auto_pivot_no_face_unchanged(self):
+    def test_auto_pivot_body_only_sets_head(self):
         props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
         hs._auto_face_pivot(props, [self._body()])
+        self.assertEqual(props.shrink_origin, (16.0, 16.0, 16.0))
+
+    def test_auto_pivot_single_face_treated_as_body(self):
+        # is_body_mesh は最大頂点数で判定: 単一メッシュは BODY 扱い → 頭部基準
+        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
+        hs._auto_face_pivot(props, [self._face()])
+        self.assertAlmostEqual(props.shrink_origin[0], 0.0, places=6)
+        self.assertAlmostEqual(props.shrink_origin[1], 0.3, places=6)
+        self.assertAlmostEqual(props.shrink_origin[2], 0.8, places=6)
+
+    def test_auto_pivot_no_mesh_unchanged(self):
+        props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
+        hs._auto_face_pivot(props, [])
         self.assertEqual(props.shrink_origin, (0.5, 0.5, 0.5))
 
-    def test_auto_center_updates_yz_keeps_x(self):
-        # box 中心: x 維持 / y = 顔 bbox 中心 / z = 顔 bbox 中心 + 0.1 (首を外す)
-        props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0))
+    def test_auto_center_sets_body_head_box(self):
+        # box 中心 = BODY 頭部 bbox 中心、half = 頭部 bbox の半分
+        props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0),
+                                      shrink_half=(0.2, 0.2, 0.2))
         hs._auto_face_shrink_center(props, [self._body(), self._face()])
-        self.assertEqual(props.shrink_center, (0.5, 0.2, 0.65))
+        self.assertEqual(props.shrink_center, (16.0, 16.0, 16.0))
+        self.assertEqual(props.shrink_half, (3.0, 3.0, 3.0))
 
-    def test_auto_center_no_face_unchanged(self):
-        props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0))
-        hs._auto_face_shrink_center(props, [self._body()])
+    def test_auto_center_single_face_treated_as_body(self):
+        # 単一メッシュは BODY 扱い → 頭部 bbox 基準 (half は 0.15 にクランプ)
+        props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0),
+                                      shrink_half=(0.2, 0.2, 0.2))
+        hs._auto_face_shrink_center(props, [self._face()])
+        self.assertAlmostEqual(props.shrink_center[0], 0.0, places=6)
+        self.assertAlmostEqual(props.shrink_center[1], 0.3, places=6)
+        self.assertAlmostEqual(props.shrink_center[2], 0.8, places=6)
+        self.assertEqual(props.shrink_half, (0.15, 0.15, 0.15))
+
+    def test_auto_center_no_mesh_unchanged(self):
+        props = types.SimpleNamespace(shrink_center=(0.5, 0.0, 0.0),
+                                      shrink_half=(0.2, 0.2, 0.2))
+        hs._auto_face_shrink_center(props, [])
         self.assertEqual(props.shrink_center, (0.5, 0.0, 0.0))
+        self.assertEqual(props.shrink_half, (0.2, 0.2, 0.2))
+
+
+class BodyHeadBBoxTest(unittest.TestCase):
+    """_body_head_bbox: BODY メッシュの頭部 (z 上位 35%) の bbox を返す。"""
+
+    def _body(self):
+        return _FakeObj('BODY', (0.0, 0.0, 0.0),
+                        [(float(i), float(i), float(i)) for i in range(20)])
+
+    def _face(self):
+        return _FakeObj('EYES', (0.0, 0.2, 0.3),
+                        [(0.0, 0.0, 0.0), (0.0, -0.1, 0.2), (0.0, 0.1, 0.5)])
+
+    def test_returns_head_region_bbox(self):
+        # z 0..19 の上位 35% → z >= 12.35 → 頂点 13..19 → center (16,16,16) / half (3,3,3)
+        out = hs._body_head_bbox([self._body(), self._face()])
+        self.assertEqual(out, ((16.0, 16.0, 16.0), (3.0, 3.0, 3.0)))
+
+    def test_single_face_treated_as_body(self):
+        # is_body_mesh は最大頂点数で判定: 単一メッシュは BODY 扱い
+        # face 表示空間 z 0.3..0.8 → 上位 35% (z >= 0.625) は (0, 0.3, 0.8) のみ
+        out = hs._body_head_bbox([self._face()])
+        self.assertAlmostEqual(out[0][0], 0.0, places=6)
+        self.assertAlmostEqual(out[0][1], 0.3, places=6)
+        self.assertAlmostEqual(out[0][2], 0.8, places=6)
+        self.assertEqual(out[1], (0.0, 0.0, 0.0))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(hs._body_head_bbox([]))
+
+    def test_half_clamped_to_minimum(self):
+        # 頭部が極小 (half < 0.15) でも shrink_half は 0.15 以上にクランプ
+        tiny = _FakeObj('BODY', (0.0, 0.0, 0.0),
+                        [(0.0, 0.0, 0.0), (0.0, 0.0, 0.1), (0.0, 0.0, 0.2)])
+        props = types.SimpleNamespace(shrink_center=(0.0, 0.0, 0.0),
+                                      shrink_half=(0.0, 0.0, 0.0))
+        hs._auto_face_shrink_center(props, [tiny])
+        self.assertEqual(props.shrink_half, (0.15, 0.15, 0.15))
 
 
 class CleanExportDirTest(unittest.TestCase):
