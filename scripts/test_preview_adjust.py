@@ -1466,5 +1466,140 @@ class CleanExportDirTest(unittest.TestCase):
         self.assertEqual(hs._clean_export_dir(d, 'Noelle'), 0)
 
 
+class PositionVbScanTest(unittest.TestCase):
+    """scan_dump_dir: -vs=<position_vs>- 付き vb0 を position_vb として記録。"""
+
+    DRAW_VS = '95aa6cdb84eb7b99'
+
+    def _make_dump_dir(self):
+        d = tempfile.mkdtemp(prefix='hs_pv_')
+        vb = struct.pack('<3f', 0.0, 0.0, 0.0) + b'\x00' * 28  # 1 vert (stride 40)
+        # draw ペア (frame 000001): vb0 + ib
+        with open(os.path.join(d, f'000001-vb0=def7af36-vs={self.DRAW_VS}-ps=20872172fd23eeed.buf'),
+                  'wb') as f:
+            f.write(vb * 4)  # 4 verts
+        with open(os.path.join(d, '000001-ib=11223344.buf'), 'wb') as f:
+            f.write(struct.pack('<6H', 0, 1, 2, 1, 2, 3))
+        # position_vb (スキニングパス、IB 無し): 4 verts
+        with open(os.path.join(d, '000001-vb0=d1384d15-vs=653c63ba4a73ca8b.buf'),
+                  'wb') as f:
+            f.write(vb * 4)
+        # VS 不一致の vb0 (position_vb ではない)
+        with open(os.path.join(d, f'000001-vb0=aaaa1111-vs={self.DRAW_VS}.buf'),
+                  'wb') as f:
+            f.write(vb * 4)
+        return d
+
+    def test_position_vb_recorded(self):
+        d = self._make_dump_dir()
+        hs.scan_dump_dir(d)
+        pv = hs._dump_cache['position_vb']
+        self.assertIn('d1384d15', pv)
+        self.assertEqual(pv['d1384d15']['vert_count'], 4)
+        self.assertTrue(
+            pv['d1384d15']['path'].endswith('653c63ba4a73ca8b.buf'))
+
+    def test_non_position_vs_excluded(self):
+        d = self._make_dump_dir()
+        hs.scan_dump_dir(d)
+        pv = hs._dump_cache['position_vb']
+        self.assertNotIn('aaaa1111', pv)
+        self.assertNotIn('def7af36', pv)  # draw vb0 も対象外
+
+    def test_empty_dir_no_position_vb(self):
+        with tempfile.TemporaryDirectory() as d:
+            hs.scan_dump_dir(d)
+            self.assertEqual(hs._dump_cache['position_vb'], {})
+
+    def test_real_noelle_dump_recognizes_d1384d15(self):
+        real = os.path.normpath(os.path.join(
+            SCRIPT_DIR, '..', 'assets', 'Dump', 'Noelle'))
+        if not os.path.isdir(real):
+            self.skipTest('real Noelle dump not present')
+        hs.scan_dump_dir(real)
+        pv = hs._dump_cache['position_vb']
+        self.assertIn('d1384d15', pv)
+        self.assertEqual(pv['d1384d15']['vert_count'], 15965)
+
+
+class FindPositionVbTest(unittest.TestCase):
+    """find_position_vb: 頂点数一致の position_vb エントリを返す。"""
+
+    CACHE = {'position_vb': {
+        'd1384d15': {'path': 'x.buf', 'vert_count': 15965,
+                     'vs': '653c63ba4a73ca8b'},
+        'aaa11111': {'path': 'y.buf', 'vert_count': 1083,
+                     'vs': '653c63ba4a73ca8b'},
+    }}
+
+    def test_matching_vert_count(self):
+        out = hs.find_position_vb(self.CACHE, 'def7af36', 15965)
+        self.assertEqual(out['vb_hash'], 'd1384d15')
+        self.assertEqual(out['path'], 'x.buf')
+        self.assertEqual(out['vert_count'], 15965)
+
+    def test_mismatch_returns_none(self):
+        self.assertIsNone(hs.find_position_vb(self.CACHE, 'def7af36', 999))
+
+    def test_empty_cache_returns_none(self):
+        self.assertIsNone(hs.find_position_vb({}, 'def7af36', 15965))
+
+    def test_missing_position_vb_key_returns_none(self):
+        self.assertIsNone(hs.find_position_vb({'pairs': []}, 'def7af36', 15965))
+
+
+class ExportPositionVbIniTest(unittest.TestCase):
+    """BODY + position_vb 対応時: ini の TextureOverride hash は position_vb。
+
+    フォールバック (position_vb 無し) では従来の draw_vb hash のまま。
+    build_diff_ini は units の vb_hash をそのまま使う。
+    """
+
+    def test_ini_uses_position_vb_hash(self):
+        units = [{'name': 'NoelleBody', 'vb_hash': 'd1384d15',
+                  'vert_count': 15965, 'role': 'BODY'}]
+        ini = hs.build_diff_ini('Noelle', units)
+        self.assertIn('[TextureOverrideNoelleBody]', ini)
+        self.assertIn('hash = d1384d15', ini)
+        self.assertIn('vb0 = ResourceNoelleBodyPosition', ini)
+        self.assertNotIn('def7af36', ini)
+
+    def test_fallback_keeps_draw_vb_hash(self):
+        units = [{'name': 'NoelleBody', 'vb_hash': 'def7af36',
+                  'vert_count': 15965, 'role': 'BODY'}]
+        ini = hs.build_diff_ini('Noelle', units)
+        self.assertIn('hash = def7af36', ini)
+        self.assertNotIn('d1384d15', ini)
+
+
+class PositionVbTransformTest(unittest.TestCase):
+    """position_vb は y-up モデルローカル座標: 変換は draw_vb (x-down) と別。
+
+    position_vb -> display: (dx, dy, dz) = (-lx, -lz, +ly)
+    display -> position_vb: (lx, ly, lz) = (-dx, +dz, -dy)
+    """
+
+    def test_position_vb_to_display(self):
+        # local (0.1, 1.0, 0.2): 上 (+y) が display の上 (+z)、左右反転、前後反転
+        self.assertEqual(hs.position_vb_to_display((0.1, 1.0, 0.2)),
+                         (-0.1, -0.2, 1.0))
+
+    def test_roundtrip_inverse(self):
+        p = (0.3, -0.5, 1.7)
+        out = hs.position_vb_to_display(hs.display_to_position_vb(p))
+        self.assertAlmostEqual(out[0], p[0], places=6)
+        self.assertAlmostEqual(out[1], p[1], places=6)
+        self.assertAlmostEqual(out[2], p[2], places=6)
+        back = hs.display_to_position_vb(hs.position_vb_to_display(p))
+        self.assertAlmostEqual(back[0], p[0], places=6)
+        self.assertAlmostEqual(back[1], p[1], places=6)
+        self.assertAlmostEqual(back[2], p[2], places=6)
+
+    def test_game_to_display_unchanged(self):
+        # draw_vb (game space) の変換は従来どおり (x-down -> z-up)
+        self.assertEqual(hs.game_to_display((1.0, 0.0, 0.0)), (0.0, 0.0, -1.0))
+        self.assertEqual(hs.game_to_display((0.0, 0.0, 1.0)), (1.0, 0.0, 0.0))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

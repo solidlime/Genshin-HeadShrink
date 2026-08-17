@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (1, 8, 1),
+    "version": (1, 9, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -37,6 +37,7 @@ except ImportError:
 DUMP_STRIDE = 40                    # Genshin standard position stride (float3 at offset 0)
 DUMP_INDEX_BYTES = 2                # 16-bit IB only (R16_UINT)
 DUMP_COLLECTION = "HeadShrink_Dump"
+DEFAULT_POSITION_VS = "653c63ba4a73ca8b"  # skinning (pointlist) pass VS hash
 
 
 
@@ -45,13 +46,19 @@ _DUMP_FRAME_RE = re.compile(r'^(\d+)-vb0=([0-9a-fA-F]+)')
 _DUMP_IB_RE = re.compile(r'^(\d+)-ib=([0-9a-fA-F]+)')
 
 
-def scan_dump_dir(dump_dir):
+def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     """Scan a 3DMigoto frame dump dir -> list of (vb0, ib) pairs.
 
     Pairs files 'NNNNNN-vb0=<hash>-...' with 'NNNNNN-ib=<hash>-...' sharing the
     same frame number. vert_count/index_count are derived from file sizes
     (stride 40 / 16-bit). Same (vb0, ib) hash pair seen in several frames is
     deduped (identical content).
+
+    Also records pre-skin position buffers: vb0 files whose name contains
+    '-vs=<position_vs>-' (the skinning pass VS) into the global
+    _dump_cache['position_vb'] = {vb_hash: {'path', 'vert_count', 'vs'}}.
+    These non-indexed buffers have the same vertex count/order as the draw
+    vb0, so positions can be transplanted for anim-following vb replacement.
     """
     try:
         names = os.listdir(dump_dir)
@@ -85,6 +92,27 @@ def scan_dump_dir(dump_dir):
             'index_count': os.path.getsize(ib_path) // DUMP_INDEX_BYTES,
             'vb0_path': vb0_path, 'ib_path': ib_path,
         })
+    # Pre-skin position buffers (skinning pass, no IB -> not in pairs).
+    position_vb = {}
+    vs_re = re.compile(rf'-vs={re.escape(position_vs)}(?:-|\.)')
+    for fn in names:
+        low = fn.lower()
+        if not (low.endswith('.buf') and 'vb0=' in low
+                and vs_re.search(low)):
+            continue
+        m = re.search(r'vb0=([0-9a-f]{8})', low)
+        if not m:
+            continue
+        h = m.group(1)
+        if h in position_vb:
+            continue
+        path = os.path.join(dump_dir, fn)
+        position_vb[h] = {
+            'path': path,
+            'vert_count': os.path.getsize(path) // DUMP_STRIDE,
+            'vs': position_vs,
+        }
+    _dump_cache['position_vb'] = position_vb
     return out
 
 
@@ -101,6 +129,22 @@ def game_to_display(p):
 def display_to_game(p):
     """Display (z=up) -> game (x=down): (-p.z, p.y, p.x)."""
     return (-p[2], p[1], p[0])
+
+
+# position_vb (pre-skin buffer, skinning pass vs=653c63ba4a73ca8b) is in
+# y-up MODEL-LOCAL space, unlike draw_vb which is x-down game space. The
+# game VS re-skins position_vb every frame; overriding it therefore needs
+# the model-local frame, not game space:
+#   position_vb -> display: (dx, dy, dz) = (-lx, -lz, +ly)
+#   display -> position_vb: (lx, ly, lz) = (-dx, +dz, -dy)
+def position_vb_to_display(p):
+    """position_vb (y-up model-local) -> display: (-p.x, -p.z, +p.y)."""
+    return (-p[0], -p[2], p[1])
+
+
+def display_to_position_vb(p):
+    """display -> position_vb (y-up model-local). Inverse of position_vb_to_display."""
+    return (-p[0], p[2], -p[1])
 
 
 def preview_shrink_mesh(mesh, center, half, scale, offset=(0.0, 0.0, 0.0),
@@ -161,11 +205,13 @@ def head_center_from_verts(verts, fraction=0.25):
     return tuple(sum(p[i] for p in sel) / len(sel) for i in range(3))
 
 
-def load_dump_mesh(vb0_path, ib_path, stride=DUMP_STRIDE):
+def load_dump_mesh(vb0_path, ib_path, stride=DUMP_STRIDE,
+                   transform=game_to_display):
     """Read a stride-40 vb0 + 16-bit ib -> (verts, faces, max_index).
 
     Faces follow IB order (3 indices per triangle). Vertices are returned in
-    display coordinates (game_to_display applied). Raises ValueError on odd
+    display coordinates (transform applied; draw vb0 uses game_to_display,
+    position_vb uses position_vb_to_display). Raises ValueError on odd
     IB size (not 16-bit) or when max index exceeds vert_count (likely 32-bit).
     """
     with open(vb0_path, 'rb') as f:
@@ -176,7 +222,7 @@ def load_dump_mesh(vb0_path, ib_path, stride=DUMP_STRIDE):
         raise ValueError(f'IB size {len(ib)} is odd; expected 16-bit indices')
     index_count = len(ib) // 2
     vert_count = len(vb) // stride
-    verts = [game_to_display(struct.unpack_from('<3f', vb, i * stride))
+    verts = [transform(struct.unpack_from('<3f', vb, i * stride))
              for i in range(vert_count)]
     idx = struct.unpack('<%dH' % index_count, ib)
     max_index = max(idx) if idx else 0
@@ -416,6 +462,22 @@ def find_dump_vb0_path(dump_dir, vb_hash, dump_cache=None):
     for fn in names:
         if fn.lower().endswith('.buf') and f'vb0={vb_hash}' in fn.lower():
             return os.path.join(dump_dir, fn)
+    return None
+
+
+def find_position_vb(dump_cache, vb_hash, vert_count):
+    """Pre-skin position buffer matching a draw vb0 (by vertex count).
+
+    The skinning pass renders non-indexed: its vb0 (position_vb) has the
+    same vertex count and vertex order as the draw vb0, so positions can be
+    transplanted directly (the game VS re-skins them every frame). Returns
+    {'path', 'vert_count', 'vs', 'vb_hash'} for the first position_vb whose
+    vert_count matches, else None.
+    """
+    position_vb = (dump_cache or {}).get('position_vb') or {}
+    for h, info in position_vb.items():
+        if info.get('vert_count') == vert_count:
+            return dict(info, vb_hash=h)
     return None
 
 
@@ -771,7 +833,7 @@ def select_import_pairs(pairs, units_map=None):
 
 
 # ===== PROPERTIES (stored on Scene) =====
-_dump_cache = {'pairs': []}  # filled by NHS_OT_AnalyzeDump -> scan_dump_dir()
+_dump_cache: dict = {'pairs': []}  # filled by NHS_OT_AnalyzeDump -> scan_dump_dir()
 _last_auto_setup_dir = None  # 直近に auto_setup を実行した dump_dir (連続発火防止)
 _last_preview_pair = None  # 直近にプレビューした dump_pair 文字列 (連続発火防止)
 
@@ -1002,10 +1064,13 @@ class HS_UL_DumpPairList(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data,
                   active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            registered = any(u.vb0 == item.vb0
-                             for u in context.scene.headshrink_props.units_list)
-            row_icon = 'CHECKBOX_HLT' if registered else 'BLANK1'
-            if not registered:
+            is_pos = item.pair_name.startswith('position:')
+            registered = (not is_pos) and any(
+                u.vb0 == item.vb0
+                for u in context.scene.headshrink_props.units_list)
+            row_icon = ('OUTLINER_DATA_ARMATURE' if is_pos
+                        else ('CHECKBOX_HLT' if registered else 'BLANK1'))
+            if not registered and not is_pos:
                 layout.active = False  # 未登録ペアは行全体を薄く表示
             row = layout.row()
             row.label(text=item.pair_name, icon=row_icon)
@@ -1035,6 +1100,14 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         default='VB_REPLACE',
     )
     # ---- 3DMigoto dump workflow ----
+    position_vs: bpy.props.StringProperty(
+        name="Skinning VS Hash",
+        description="Vertex shader hash of the skinning (pointlist) pass; "
+                    "vb0 files whose name contains -vs=<this>- are the "
+                    "pre-skin position buffers (position_vb) that the game "
+                    "re-skins every frame (anim-following vb replacement)",
+        default=DEFAULT_POSITION_VS,
+    )
     dump_dir: bpy.props.StringProperty(
         name="Dump Dir",
         description="3DMigoto frame dump directory (vb0/ib .buf files)",
@@ -1215,6 +1288,13 @@ class NHS_OT_AnalyzeDump(bpy.types.Operator):
             item.vb0 = p['vb0']
             item.ib = p['ib']
             item.vert_count = p['vert_count']
+        # スキニング前 position バッファ (IB 無し) も参考表示
+        for h, info in _dump_cache.get('position_vb', {}).items():
+            item = props.dump_pairs.add()
+            item.pair_name = f"position: {h}"
+            item.vb0 = h
+            item.ib = ''
+            item.vert_count = info['vert_count']
         if not pairs:
             self.report({'WARNING'}, f"No vb0/ib pairs found in {dump_dir}")
             return {'FINISHED'}
@@ -1274,6 +1354,12 @@ class NHS_OT_UnitsAddPair(bpy.types.Operator):
             self.report({'ERROR'}, "Selected pair not found. Run Analyze Dump again")
             return {'CANCELLED'}
         vb0 = sel.vb0
+        # position_vb は draw_vb と別物: 通常は draw_vb を BODY 登録すれば
+        # 自動対応付けされる (直接登録は必須でない)
+        note = ("position_vb はスキニング前バッファ。通常フローでは "
+                "draw_vb を BODY 登録すれば自動対応付けされます") \
+            if sel.pair_name.startswith('position:') \
+            else "保存して ③ セットアップで表示"
         for i, item in enumerate(props.units_list):
             if item.vb0 == vb0:  # 既存 vb0 は role 更新
                 item.role = props.units_role
@@ -1285,7 +1371,7 @@ class NHS_OT_UnitsAddPair(bpy.types.Operator):
         item.role = props.units_role
         props.units_list_index = len(props.units_list) - 1
         self.report({'INFO'}, f"Units: {vb0} registered as {props.units_role}. "
-                              f"保存して ③ セットアップで表示")
+                              f"{note}")
         return {'FINISHED'}
 
 
@@ -1352,12 +1438,33 @@ def _import_pair(context, pair, units_map=None):
     Replaces any existing Dump_<vb0> object. Adds hs_original_pos + the
     hs_vb0_hash/hs_ib_hash/hs_vert_count/hs_role custom properties. Role comes
     from the per-character units map first, else largest pair = BODY, else
-    OTHER. Returns (obj, role, nverts, ntris, max_index); raises OSError/
+    OTHER. A BODY pair with a matching position_vb is loaded from the pre-skin
+    buffer (hs_position_vb set) so the preview shows the posed shape. Returns
+    (obj, role, nverts, ntris, max_index); raises OSError/
     ValueError on load failure.
     """
     if units_map is None:
         units_map = {}
-    verts, faces, max_index = load_dump_mesh(pair['vb0_path'], pair['ib_path'])
+    # ゴミ除外後の選択候補基準で最大判定 (ゴミが最大でも真のボディが BODY になる)
+    candidates = select_import_pairs(_dump_cache['pairs'], units_map)
+    is_largest = all(pair['vert_count'] >= p['vert_count']
+                     for p in candidates)
+    role = role_for_pair(pair['vb0'], pair['vert_count'], units_map, is_largest)
+    # BODY + position_vb 対応: スキニング前 position バッファから読込 (頂点数
+    # 同一なので IB は draw 側を流用)。position_vb は毎フレーム再スキニング
+    # されるため、プレビューは直立ポーズではなくポーズ反映済み形状になる。
+    vb0_path = pair['vb0_path']
+    transform = game_to_display
+    position_vb = None
+    if role == 'BODY':
+        position_vb = find_position_vb(_dump_cache, pair['vb0'],
+                                       pair['vert_count'])
+        if position_vb is not None:
+            vb0_path = position_vb['path']
+            # position_vb is y-up model-local, not game space
+            transform = position_vb_to_display
+    verts, faces, max_index = load_dump_mesh(
+        vb0_path, pair['ib_path'], transform=transform)
     coll = bpy.data.collections.get(DUMP_COLLECTION)
     if coll is None:
         coll = bpy.data.collections.new(DUMP_COLLECTION)
@@ -1378,12 +1485,9 @@ def _import_pair(context, pair, units_map=None):
     obj["hs_vb0_hash"] = pair['vb0']
     obj["hs_ib_hash"] = pair['ib']
     obj["hs_vert_count"] = pair['vert_count']
-    # ゴミ除外後の選択候補基準で最大判定 (ゴミが最大でも真のボディが BODY になる)
-    candidates = select_import_pairs(_dump_cache['pairs'], units_map)
-    is_largest = all(pair['vert_count'] >= p['vert_count']
-                     for p in candidates)
-    role = role_for_pair(pair['vb0'], pair['vert_count'], units_map, is_largest)
     obj["hs_role"] = role
+    if position_vb is not None:
+        obj["hs_position_vb"] = position_vb['vb_hash']
     return obj, role, len(verts), len(faces), max_index
 
 
@@ -1407,7 +1511,9 @@ class NHS_OT_ImportDump(bpy.types.Operator):
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
         self.report({'INFO'}, f"Imported {obj.name}: {nv} verts, "
-                              f"{nf} tris (role {role}, max index {mi})")
+                              f"{nf} tris (role {role}, max index {mi})"
+                              + (f" (position_vb {obj['hs_position_vb']}: "
+                                 "ポーズ反映済み形状)" if obj.get('hs_position_vb') else ""))
         return {'FINISHED'}
 
 
@@ -1426,14 +1532,19 @@ class NHS_OT_ImportAll(bpy.types.Operator):
             return {'CANCELLED'}
         imported = 0
         failed = 0
+        pv_imports = 0
         for pair in pairs:
             try:
-                _import_pair(context, pair, units_map)
+                obj, *_ = _import_pair(context, pair, units_map)
                 imported += 1
+                if obj.get('hs_position_vb'):
+                    pv_imports += 1
             except (OSError, ValueError):
                 failed += 1
+        pv_note = f"; {pv_imports} via position_vb" if pv_imports else ""
         self.report({'INFO'}, f"Imported {imported} mesh(es) into "
-                              f"{DUMP_COLLECTION} (skipped {failed} failed)")
+                              f"{DUMP_COLLECTION} (skipped {failed} failed)"
+                              f"{pv_note}")
         return {'FINISHED'}
 
 
@@ -1477,19 +1588,23 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         pairs = select_import_pairs(_dump_cache['pairs'], units_map)
         imported = 0
         failed = 0
+        pv_imports = 0
         for pair in pairs:
             try:
-                _import_pair(context, pair, units_map)
+                obj, *_ = _import_pair(context, pair, units_map)
                 imported += 1
+                if obj.get('hs_position_vb'):
+                    pv_imports += 1
             except (OSError, ValueError):
                 failed += 1
         # Preview Setup 相当 (共通実装)
         result = _preview_setup_impl(self, context)
         if result != {'FINISHED'}:
             return result
+        pv_note = f"; {pv_imports} via position_vb" if pv_imports else ""
         self.report({'INFO'}, f"Auto setup: {removed} object(s) cleared, "
                               f"{imported} mesh(es) imported ({failed} failed), "
-                              f"preview ready")
+                              f"preview ready{pv_note}")
         return {'FINISHED'}
 
 
@@ -2021,8 +2136,29 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             # because preview_shrink_mesh writes back local coords.
             verts = [display_to_game(tuple(v.co)) for v in mesh.vertices]
             if mode == 'VB_REPLACE' and role == 'BODY':
-                dump_path = find_dump_vb0_path(
-                    props.dump_dir, vb0, _dump_cache.get('pairs'))
+                # Prefer the pre-skin position buffer (same vertex count):
+                # overriding it makes the game VS re-skin every frame, so the
+                # body follows animations exactly. Fall back to the draw vb0
+                # (static pose) when no position_vb was scanned.
+                position_vb = find_position_vb(
+                    _dump_cache, vb0, vert_count)
+                dump_hash, dump_path = vb0, None
+                pv_verts = verts  # draw_vb fallback: game space
+                if position_vb is not None:
+                    dump_hash = position_vb['vb_hash']
+                    dump_path = position_vb['path']
+                    # position_vb is y-up model-local, not game space: write
+                    # back in that frame so the game VS re-skins correctly.
+                    pv_verts = [display_to_position_vb(tuple(v.co))
+                                for v in mesh.vertices]
+                else:
+                    dump_path = find_dump_vb0_path(
+                        props.dump_dir, vb0, _dump_cache.get('pairs'))
+                    if dump_path is not None:
+                        self.report({'WARNING'},
+                                    f"{name}: no position_vb for {vb0} "
+                                    f"(skinning vs={props.position_vs}); "
+                                    f"using draw vb0 (static pose)")
                 if dump_path is not None:
                     # Bennett-mimic: overwrite only the position float3 of
                     # the real pre-skin vb0. normal/tangent stay from the
@@ -2030,11 +2166,11 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                     # body follows animations exactly.
                     with open(dump_path, 'rb') as f:
                         dump_bytes = f.read()
-                    pos_data = build_position_buf(dump_bytes, verts)
+                    pos_data = build_position_buf(dump_bytes, pv_verts)
                     with open(os.path.join(output_dir, f"{name}Position.buf"),
                               'wb') as f:
                         f.write(pos_data)
-                    units.append({'name': name, 'vb_hash': vb0,
+                    units.append({'name': name, 'vb_hash': dump_hash,
                                   'vert_count': vert_count, 'role': 'BODY'})
                     continue
                 # Dump vb0 missing -> fall back to CopyDispatch for this unit.
