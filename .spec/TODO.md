@@ -1,6 +1,13 @@
 # TODO - タスクリスト
 
 ## 優先度：高
+- [x] **T012: v2.0.0 プレビュー配置の近似変換 + pivot/縮小中心の整理** — 設計: docs/superpowers/specs/2026-08-17-headshrink-v2-design.md (承認済み)
+  - [x] 顔メッシュ配置: `_face_draw_to_body_space(face_mesh, body_draw_verts, body_pos_verts)` 新規 (最近傍スキニング変位加算、境界ペアの位置差中央値で loc 算出)。`_preview_setup_impl` で BODY が position_vb 空間のとき本変換で配置 (head_center - face_center から置換)。BODY draw_vb 頂点はダンプから読込 (game_to_display)
+  - [x] pivot = box 中央固定: `_auto_face_pivot` 自動設定削除、`_preview_props_update` / `NHS_OT_PreviewApply` の origin = shrink_center、UI の shrink_origin 行削除 (プロパティは互換残置)
+  - [x] 顔メッシュ縮小中心 = 顔メッシュ自身の中心: `_face_mesh_center(mesh)` 新規 (hs_original_pos + loc の bbox 中心)、顔メッシュは center=pivot=face_mesh_center で all_verts 縮小
+  - [x] プレビュー loc と export の分離保証 (export は v.co のみ使用、loc 不使用を確認)
+  - [x] テスト: 最近傍変換の正しさ / pivot=box 中央 / 顔メッシュ縮小中心 / loc 変更で export 不変 / 既存 pivot テスト更新
+  - [x] bl_info → (2, 0, 0)
 - [x] **T001: 3DMigoto .vb/.ib 変換スクリプト `scripts/build_headshrink_mod.py`** — 2026-08-15
   - [x] position-only modifier (12B/vert のみ touch、stride 残りは素通し)
   - [x] IB 分割 (match_first_index 境界)

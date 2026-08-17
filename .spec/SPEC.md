@@ -26,6 +26,13 @@
 - [ ] **ゲーム dump 取得**: xxmi-tools / 3dmigoto dump 環境構築 (T002 着手前提)
 - [ ] **.ini 実ゲームでの hash 整合確認**: XXMI-Launcher で mod 適用テスト
 
+## v2.0.0 仕様 (2026-08-17, 設計承認済み: docs/superpowers/specs/2026-08-17-headshrink-v2-design.md)
+- [ ] **顔メッシュのプレビュー配置 (draw_vb → position_vb 空間の近似変換)**: BODY は position_vb 空間 (直立)、顔メッシュは draw_vb 空間 (ポーズ) のまま表示し、BODY 頭部に自動配置。方式 = 最近傍スキニング変位加算: 各顔頂点 p に対し BODY draw_vb の最近傍頂点 i を探索し p' = p + (body_pos[i] - body_draw[i])。配置 loc = 境界ペア (距離 < 閾値) の位置差の中央値 (既存 _match_face_offsets の手法を流用)。顔メッシュの v.co は draw_vb 空間のまま、変換は obj.location で表現 → export は v.co だけで完結 (loc と独立)
+- [ ] **box/pivot 整理**: pivot (縮小中心) = box 中央固定 (v1.7.1 相当)。_auto_face_pivot の自動設定を削除し、_preview_props_update / NHS_OT_PreviewApply は origin = shrink_center。_body_head_bbox は box 初期配置のみに使用。UI の shrink_origin 行は削除 (プロパティは互換残置)
+- [ ] **顔メッシュの縮小中心 = 顔メッシュ自身の中心**: 顔メッシュの全頂点変形は表示空間 bbox 中心 (hs_original_pos + loc) 基準。BODY は box/pivot (box 中央) 基準のまま
+- [ ] **プレビューと mod 出力の分離保証**: export はプレビューの loc を一切使わない (BODY: display_to_position_vb(v.co)、顔: display_to_game(v.co))。顔メッシュの縮小は draw_vb 空間の v.co に対して行う
+- [ ] バージョン (2, 0, 0)
+
 ## 非機能要件
 - **パフォーマンス**: .blk 41MB 全体を復号しても数十秒以内
 - **互換性**: Blender 5.2.0 LTS / Python 3.12 / Windows

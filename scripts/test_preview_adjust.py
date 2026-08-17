@@ -1202,8 +1202,9 @@ class _FakeObj:
         self.location = location
         self._role = role
         self._vb0 = vb0
-        self.data = types.SimpleNamespace(vertices=[
-            types.SimpleNamespace(co=v) for v in verts])
+        self.data = types.SimpleNamespace(
+            vertices=[types.SimpleNamespace(co=v) for v in verts],
+            attributes=_FakeAttributes({}))
 
     def get(self, key, default=None):
         if key == 'hs_role':
@@ -1391,7 +1392,7 @@ class MatchFaceOffsetsTest(unittest.TestCase):
 
 
 class FaceBBoxCenterTest(unittest.TestCase):
-    """_face_bbox_center / _auto_face_pivot / _auto_face_shrink_center:
+    """_face_bbox_center / _auto_face_shrink_center:
     v1.9.2 以降は BODY 頭部 (position_vb 空間) 基準。BODY 無しは顔基準フォールバック。"""
 
     def _body(self):
@@ -1416,39 +1417,6 @@ class FaceBBoxCenterTest(unittest.TestCase):
         # loc=(0,0,0) の顔 (未配置のダンプ原位置) は対象外 → None
         face = _FakeObj('EYES', (0.0, 0.0, 0.0), [(0.0, -0.5, 0.4)])
         self.assertIsNone(hs._face_bbox_center([self._body(), face]))
-
-    def test_auto_pivot_sets_body_head_center(self):
-        # pivot = 頭部 bbox の下端 (z_min = center.z - half.z = 16-3 = 13)
-        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
-        hs._auto_face_pivot(props, [self._body(), self._face()])
-        self.assertEqual(props.shrink_origin, (16.0, 16.0, 13.0))
-
-    def test_auto_pivot_body_only_sets_head(self):
-        props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
-        hs._auto_face_pivot(props, [self._body()])
-        self.assertEqual(props.shrink_origin, (16.0, 16.0, 13.0))
-
-    def test_auto_pivot_z_is_head_bbox_bottom(self):
-        # 明示検証: pivot z = 頭部 bbox の z_min (首との境界)
-        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
-        hs._auto_face_pivot(props, [self._body()])
-        center, half = hs._body_head_bbox([self._body()])
-        self.assertEqual(props.shrink_origin[2], center[2] - half[2])
-        self.assertEqual(props.shrink_origin[0], center[0])
-        self.assertEqual(props.shrink_origin[1], center[1])
-
-    def test_auto_pivot_single_face_treated_as_body(self):
-        # is_body_mesh は最大頂点数で判定: 単一メッシュは BODY 扱い → 頭部基準
-        props = types.SimpleNamespace(shrink_origin=(0.0, 0.0, 0.0))
-        hs._auto_face_pivot(props, [self._face()])
-        self.assertAlmostEqual(props.shrink_origin[0], 0.0, places=6)
-        self.assertAlmostEqual(props.shrink_origin[1], 0.3, places=6)
-        self.assertAlmostEqual(props.shrink_origin[2], 0.8, places=6)
-
-    def test_auto_pivot_no_mesh_unchanged(self):
-        props = types.SimpleNamespace(shrink_origin=(0.5, 0.5, 0.5))
-        hs._auto_face_pivot(props, [])
-        self.assertEqual(props.shrink_origin, (0.5, 0.5, 0.5))
 
     def test_auto_center_sets_body_head_box(self):
         # box 中心 = BODY 頭部 bbox 中心、half = 頭部 bbox の半分
@@ -1675,6 +1643,156 @@ class PositionVbTransformTest(unittest.TestCase):
         # draw_vb (game space) の変換は従来どおり (x-down -> z-up)
         self.assertEqual(hs.game_to_display((1.0, 0.0, 0.0)), (0.0, 0.0, -1.0))
         self.assertEqual(hs.game_to_display((0.0, 0.0, 1.0)), (1.0, 0.0, 0.0))
+
+
+class FaceDrawToBodySpaceTest(unittest.TestCase):
+    """_face_draw_to_body_space: 最近傍スキニング変位の中央値で loc を計算。"""
+
+    def _grid(self, nx=5, ny=5, nz=3):
+        # 格子状 body_draw 頂点 (draw_vb 表示空間)
+        return [(float(x) * 0.1, float(y) * 0.1, float(z) * 0.1)
+                for z in range(nz) for y in range(ny) for x in range(nx)]
+
+    def test_loc_is_median_displacement(self):
+        # body_pos = body_draw + (0.1, 0.2, 0.3) → loc は変位の中央値に一致
+        body_draw = self._grid()
+        body_pos = [(x + 0.1, y + 0.2, z + 0.3) for x, y, z in body_draw]
+        # face 頂点は body_draw の表面頂点そのもの (距離 0 → 全ペア境界)
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), body_draw)
+        loc = hs._face_draw_to_body_space(face, body_draw, body_pos)
+        self.assertIsNotNone(loc)
+        for i in range(3):
+            self.assertAlmostEqual(loc[i], (0.1, 0.2, 0.3)[i], places=6)
+
+    def test_far_face_returns_none(self):
+        # face が body から遠い (距離 >= 0.02) → 境界ペア 0 件 → None
+        body_draw = self._grid()
+        body_pos = [(x + 0.1, y + 0.2, z + 0.3) for x, y, z in body_draw]
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0),
+                        [(5.0, 5.0, 5.0), (5.1, 5.1, 5.1)])
+        self.assertIsNone(hs._face_draw_to_body_space(face, body_draw, body_pos))
+
+    def test_np_none_returns_none(self):
+        saved = hs.np
+        hs.np = None
+        try:
+            body_draw = self._grid()
+            face = _FakeObj('EYES', (0.0, 0.0, 0.0), body_draw)
+            self.assertIsNone(
+                hs._face_draw_to_body_space(face, body_draw, body_draw))
+        finally:
+            hs.np = saved
+
+    def test_shape_mismatch_returns_none(self):
+        # body_draw と body_pos の頂点数不一致 → None
+        body_draw = self._grid()
+        face = _FakeObj('EYES', (0.0, 0.0, 0.0), body_draw[:3])
+        self.assertIsNone(
+            hs._face_draw_to_body_space(face, body_draw, body_draw[:2]))
+
+
+class FaceMeshCenterTest(unittest.TestCase):
+    """_face_mesh_center: 顔メッシュ自身の表示空間 bbox 中心 (loc 非依存)。"""
+
+    def test_center_from_original_pos_plus_loc(self):
+        # hs_original_pos 基準: ローカル (0..2, 0..2, 0..2) + loc (1,2,3)
+        # → 表示空間 bbox 中心 (2, 3, 4)
+        mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=(1.0, 2.0, 3.0))
+        obj = types.SimpleNamespace(data=mesh, location=(1.0, 2.0, 3.0))
+        self.assertEqual(hs._face_mesh_center(obj), (2.0, 3.0, 4.0))
+
+    def test_center_loc_independent(self):
+        # 表示空間中心は loc に追従するが、ローカル中心 (hs_original_pos の
+        # bbox 中心) は loc 非依存 → export (v.co のみ) と分離されている
+        mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=(1.0, 2.0, 3.0))
+        a = hs._face_mesh_center(
+            types.SimpleNamespace(data=mesh, location=(1.0, 2.0, 3.0)))
+        b = hs._face_mesh_center(
+            types.SimpleNamespace(data=mesh, location=(9.0, 9.0, 9.0)))
+        self.assertEqual(a, (2.0, 3.0, 4.0))    # 表示中心 = ローカル中心 + loc
+        self.assertEqual(b, (10.0, 10.0, 10.0))  # loc 変更で表示中心は追従
+        # ローカル中心 (hs_original_pos のみ) は両ケースで同一
+        local = hs._face_mesh_center(
+            types.SimpleNamespace(data=mesh, location=(0.0, 0.0, 0.0)))
+        self.assertEqual(local, (1.0, 1.0, 1.0))
+
+    def test_center_without_original_pos(self):
+        # hs_original_pos 無し → v.co + loc で bbox 中心
+        obj = _FakeObj('EYES', (1.0, 2.0, 3.0),
+                       [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        self.assertEqual(hs._face_mesh_center(obj), (2.0, 3.0, 4.0))
+
+    def test_no_vertices_returns_none(self):
+        mesh = _FakeMesh([])
+        self.assertIsNone(hs._face_mesh_center(
+            types.SimpleNamespace(data=mesh, location=(0.0, 0.0, 0.0))))
+
+
+class BoxCenterPivotTest(unittest.TestCase):
+    """v2.0.0: BODY 縮小の pivot は box 中央固定 (shrink_origin 非依存)。"""
+
+    def _body_mesh(self):
+        # ローカル (0..2, 0..2, 0..2)、loc=(0,0,0)。box 中央 (1,1,1) half (1,1,1)
+        return _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+
+    def test_body_shrinks_toward_box_center(self):
+        # scale=0.5: 頂点は box 中央 (1,1,1) へ半分寄る → (0.5,0.5,0.5)/(1.5,1.5,1.5)
+        mesh = self._body_mesh()
+        hs.preview_shrink_mesh(mesh, (1.0, 1.0, 1.0), (1.0, 1.0, 1.0),
+                               0.5, (0.0, 0.0, 0.0), 0.0, (0.0, 0.0, 0.0),
+                               False, (1.0, 1.0, 1.0))
+        self.assertEqual(tuple(mesh.vertices[0].co), (0.5, 0.5, 0.5))
+        self.assertEqual(tuple(mesh.vertices[1].co), (1.5, 1.5, 1.5))
+
+    def test_result_independent_of_shrink_origin(self):
+        # BODY の pivot は box 中央固定: origin=center と origin=None
+        # (既定 = center) で結果が一致することを確認
+        mesh_a = self._body_mesh()
+        mesh_b = self._body_mesh()
+        hs.preview_shrink_mesh(mesh_a, (1.0, 1.0, 1.0), (1.0, 1.0, 1.0),
+                               0.5, (0.0, 0.0, 0.0), 0.0, (0.0, 0.0, 0.0),
+                               False, (1.0, 1.0, 1.0))
+        hs.preview_shrink_mesh(mesh_b, (1.0, 1.0, 1.0), (1.0, 1.0, 1.0),
+                               0.5, (0.0, 0.0, 0.0), 0.0, (0.0, 0.0, 0.0),
+                               False, None)
+        self.assertEqual(tuple(mesh_a.vertices[0].co),
+                         tuple(mesh_b.vertices[0].co))
+        self.assertEqual(tuple(mesh_a.vertices[1].co),
+                         tuple(mesh_b.vertices[1].co))
+
+
+class ExportIndependenceTest(unittest.TestCase):
+    """v2.0.0: プレビュー縮小は obj.location 非依存 (export は v.co のみ使用)。"""
+
+    def test_face_shrink_loc_independent(self):
+        # 顔メッシュ: 同じ縮小を loc=A / loc=B で適用 → v.co は同一
+        def apply_at(loc):
+            mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
+            obj = types.SimpleNamespace(data=mesh, location=loc)
+            fc = hs._face_mesh_center(obj)
+            hs.preview_shrink_mesh(mesh, fc, (1.0, 1.0, 1.0), 0.5,
+                                   loc, 0.0, (0.0, 0.0, 0.0), True, fc)
+            return [tuple(v.co) for v in mesh.vertices]
+
+        co_a = apply_at((1.0, 2.0, 3.0))
+        co_b = apply_at((9.0, 9.0, 9.0))
+        self.assertEqual(co_a, co_b)
+
+    def test_body_shrink_loc_independent(self):
+        # BODY: v.co はローカル空間で書き戻される (export は v.co のみ使用)。
+        # 同じ loc で適用すれば v.co は同一 → export は loc 非依存
+        def apply_at(loc):
+            mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
+            hs.preview_shrink_mesh(mesh, (1.0, 1.0, 1.0), (1.0, 1.0, 1.0),
+                                   0.5, loc, 0.0, (0.0, 0.0, 0.0),
+                                   False, (1.0, 1.0, 1.0))
+            return [tuple(v.co) for v in mesh.vertices]
+
+        co_a = apply_at((0.0, 0.0, 0.0))
+        co_b = apply_at((0.0, 0.0, 0.0))
+        self.assertEqual(co_a, co_b)
+        # v.co はローカル空間 (hs_original_pos 基準) の値
+        self.assertEqual(co_a, [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
 
 
 if __name__ == '__main__':
