@@ -1028,6 +1028,45 @@ class CharConfigTest(unittest.TestCase):
         self.assertEqual(props.shrink_center, (0.0, 0.0, 0.0))
 
 
+class UnitsMapFromConfigAndListTest(unittest.TestCase):
+    """units_map_from_config_and_list: config units と units_list をマージ
+    (同じ vb0 は units_list の role が勝つ)。UnitsSave 不要で即時反映。"""
+
+    def _props(self, units_list):
+        return types.SimpleNamespace(
+            char_name='Noelle',
+            units_list=[types.SimpleNamespace(vb0=v, role=r)
+                        for v, r in units_list],
+        )
+
+    def _run(self, units_list, config_units):
+        orig_path = hs.face_offsets_path
+        orig_load = hs.load_char_config
+        hs.face_offsets_path = lambda: 'x.json'
+        hs.load_char_config = lambda path, name: {'units': config_units}
+        try:
+            return hs.units_map_from_config_and_list(self._props(units_list))
+        finally:
+            hs.face_offsets_path = orig_path
+            hs.load_char_config = orig_load
+
+    def test_includes_config_units(self):
+        out = self._run([], {'a': 'BODY', 'b': 'MOUTH'})
+        self.assertEqual(out, {'a': 'BODY', 'b': 'MOUTH'})
+
+    def test_merges_units_list(self):
+        out = self._run([('c', 'HEAD')], {'a': 'BODY'})
+        self.assertEqual(out, {'a': 'BODY', 'c': 'HEAD'})
+
+    def test_units_list_wins_on_same_vb0(self):
+        out = self._run([('b', 'EYES')], {'a': 'BODY', 'b': 'MOUTH'})
+        self.assertEqual(out, {'a': 'BODY', 'b': 'EYES'})
+
+    def test_empty_units_list_config_only(self):
+        out = self._run([], {'a': 'BODY'})
+        self.assertEqual(out, {'a': 'BODY'})
+
+
 class ResolveCharConfigTest(unittest.TestCase):
     """resolve_char_config merges the shared __default__ base with the
     per-character config (character wins on key conflicts)."""

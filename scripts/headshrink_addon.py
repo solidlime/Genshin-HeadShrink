@@ -620,6 +620,20 @@ def load_char_config(path, char_name):
     return cfg if isinstance(cfg, dict) else {}
 
 
+def units_map_from_config_and_list(props):
+    """保存済み config の units と props.units_list をマージして返す。
+
+    units_list 優先 (同じ vb0 は units_list の role が勝つ)。UnitsSave を
+    押さなくても追加ユニットが AutoSetup / ImportAll / ImportDump /
+    PreviewPair で即座に使われるようにする。
+    """
+    units = dict(load_char_config(
+        face_offsets_path(), props.char_name.strip()).get('units', {}))
+    for item in props.units_list:
+        units[item.vb0] = item.role
+    return units
+
+
 def _has_registered_units(char_name):
     """キャラの units (vb0->role) が登録済みか (__config__.units が非空 dict)。
 
@@ -1369,8 +1383,7 @@ class NHS_OT_ImportDump(bpy.types.Operator):
         if pair is None:
             self.report({'ERROR'}, "Run Analyze Dump and select a pair first")
             return {'CANCELLED'}
-        units_map = load_char_config(
-            face_offsets_path(), props.char_name.strip()).get('units', {})
+        units_map = units_map_from_config_and_list(props)
         try:
             obj, role, nv, nf, mi = _import_pair(context, pair, units_map)
         except (OSError, ValueError) as e:
@@ -1390,8 +1403,7 @@ class NHS_OT_ImportAll(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.headshrink_props
-        units_map = load_char_config(
-            face_offsets_path(), props.char_name.strip()).get('units', {})
+        units_map = units_map_from_config_and_list(props)
         pairs = select_import_pairs(_dump_cache['pairs'], units_map)
         if not pairs:
             self.report({'ERROR'}, "Run Analyze Dump first (no candidate pairs)")
@@ -1449,8 +1461,7 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         if not _dump_cache['pairs']:
             self.report({'WARNING'}, f"No vb0/ib pairs found in {dump_dir}")
             return {'FINISHED'}
-        units_map = load_char_config(
-            face_offsets_path(), props.char_name.strip()).get('units', {})
+        units_map = units_map_from_config_and_list(props)
         pairs = select_import_pairs(_dump_cache['pairs'], units_map)
         imported = 0
         failed = 0
@@ -1928,8 +1939,7 @@ class NHS_OT_PreviewPair(bpy.types.Operator):
             return {'CANCELLED'}
         # シーン内の全オブジェクトと専用コレクションを削除
         _clear_scene()
-        units_map = load_char_config(
-            face_offsets_path(), props.char_name.strip()).get('units', {})
+        units_map = units_map_from_config_and_list(props)
         try:
             obj, role, nv, nf, mi = _import_pair(context, pair, units_map)
         except (OSError, ValueError) as e:
