@@ -54,6 +54,10 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     (stride 40 / 16-bit). Same (vb0, ib) hash pair seen in several frames is
     deduped (identical content).
 
+    Subdirectories are scanned recursively (the user may point dump_dir at a
+    parent folder containing multiple FrameAnalysis-* dirs). by_frame keys use
+    the subdir-relative path + frame number to avoid collisions across dirs.
+
     Also records pre-skin position buffers: vb0 files whose name contains
     '-vs=<position_vs>-' (the skinning pass VS) into the global
     _dump_cache['position_vb'] = {vb_hash: {'path', 'vert_count', 'vs'}}.
@@ -61,41 +65,35 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     vb0, so positions can be transplanted for anim-following vb replacement.
     """
     try:
-        names = os.listdir(dump_dir)
+        walk = list(os.walk(dump_dir))
     except OSError:
         return []
     by_frame = {}
-    for fn in names:
-        m = _DUMP_FRAME_RE.match(fn)
-        if m:
-            by_frame.setdefault(m.group(1), {})['vb0'] = (
-                m.group(2).lower(), os.path.join(dump_dir, fn))
-            continue
-        m = _DUMP_IB_RE.match(fn)
-        if m:
-            by_frame.setdefault(m.group(1), {})['ib'] = (
-                m.group(2).lower(), os.path.join(dump_dir, fn))
-    seen, out = set(), []
-    for frame in sorted(by_frame):
-        pair = by_frame[frame]
-        if 'vb0' not in pair or 'ib' not in pair:
-            continue
-        key = (pair['vb0'][0], pair['ib'][0])
-        if key in seen:
-            continue
-        seen.add(key)
-        vb0_hash, vb0_path = pair['vb0']
-        ib_hash, ib_path = pair['ib']
-        out.append({
-            'vb0': vb0_hash, 'ib': ib_hash, 'frame': frame,
-            'vert_count': os.path.getsize(vb0_path) // DUMP_STRIDE,
-            'index_count': os.path.getsize(ib_path) // DUMP_INDEX_BYTES,
-            'vb0_path': vb0_path, 'ib_path': ib_path,
-        })
+    all_files = []  # (root, fn) — position_vb 検出用 (全サブディレクトリ)
+    for root, _dirs, files in walk:
+        rel = os.path.relpath(root, dump_dir)
+        prefix = '' if rel == '.' else rel + os.sep
+        for fn in files:
+            all_files.append((root, fn))
+            m = _DUMP_FRAME_RE.match(fn)
+            if m:
+                # サブディレクトリ相対パス + フレーム番号でキー化
+                # (FrameAnalysis ごとに 000001 から始まるため衝突防止)
+                key = prefix + m.group(1)
+                by_frame.setdefault(key, {})['vb0'] = (
+                    m.group(2).lower(), os.path.join(root, fn))
+                continue
+            m = _DUMP_IB_RE.match(fn)
+            if m:
+                key = prefix + m.group(1)
+                by_frame.setdefault(key, {})['ib'] = (
+                    m.group(2).lower(), os.path.join(root, fn))
     # Pre-skin position buffers (skinning pass, no IB -> not in pairs).
+    # vb0/ib ペアと独立に全ファイルを走査 (ハッシュ付き position_vb は
+    # _DUMP_FRAME_RE にマッチするため、ここで別途拾う必要がある)。
     position_vb = {}
     vs_re = re.compile(rf'-vs={re.escape(position_vs)}(?:-|\.)')
-    for fn in names:
+    for root, fn in all_files:
         low = fn.lower()
         # vb0 ファイル (ハッシュ付き -vb0= または ハッシュなし -vb0-) かつ
         # スキニングパスの VS 一致のみ position_vb として記録。
@@ -110,14 +108,62 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
             h = position_vs
         if h in position_vb:
             continue
-        path = os.path.join(dump_dir, fn)
+        path = os.path.join(root, fn)
         position_vb[h] = {
             'path': path,
             'vert_count': os.path.getsize(path) // DUMP_STRIDE,
             'vs': position_vs,
         }
+    seen, out = set(), []
+    for frame in sorted(by_frame):
+        pair = by_frame[frame]
+        if 'vb0' not in pair or 'ib' not in pair:
+            continue
+        key = (pair['vb0'][0], pair['ib'][0])
+        if key in seen:
+            continue
+        seen.add(key)
+        vb0_hash, vb0_path = pair['vb0']
+        ib_hash, ib_path = pair['ib']
+        # vs 抽出 (vb0 ファイル名から -vs=<hash>、無ければ '')
+        vs_m = re.search(r'-vs=([0-9a-f]{8})',
+                         os.path.basename(vb0_path).lower())
+        out.append({
+            'vb0': vb0_hash, 'ib': ib_hash, 'frame': frame,
+            'vert_count': os.path.getsize(vb0_path) // DUMP_STRIDE,
+            'index_count': os.path.getsize(ib_path) // DUMP_INDEX_BYTES,
+            'vb0_path': vb0_path, 'ib_path': ib_path,
+            'vs': vs_m.group(1) if vs_m else '',
+        })
     _dump_cache['position_vb'] = position_vb
     return out
+
+
+def find_secondary_vb0s(pairs, units):
+    """セカンダリ VB を検出して {vb0: role} を返す。
+
+    同一 (ib, vs) グループ内に複数の vb0 があり、そのうち units (vb0 -> role)
+    に登録済みのものがある場合、units に無い vb0 をセカンダリとして、
+    プライマリと同じ role で返す (複数グループ可、dict でマージ)。
+    units が空なら {}。
+    """
+    if not units:
+        return {}
+    groups = {}
+    for p in pairs:
+        key = (p['ib'], p.get('vs', ''))
+        groups.setdefault(key, set()).add(p['vb0'])
+    secondary = {}
+    for (_ib, _vs), vb0s in groups.items():
+        if len(vb0s) < 2:
+            continue
+        registered = vb0s & set(units.keys())
+        if not registered:
+            continue
+        role = units[next(iter(registered))]
+        for vb0 in vb0s - registered:
+            secondary[vb0] = role
+    return secondary
 
 
 # --- Coordinate systems -----------------------------------------------------
@@ -1204,6 +1250,24 @@ class NHS_OT_AnalyzeDump(bpy.types.Operator):
         self.report({'INFO'}, f"Found {len(pairs)} vb0/ib pairs "
                               f"(e.g. {pairs[0]['vb0'][:8]}/{pairs[0]['ib'][:8]} "
                               f"{pairs[0]['vert_count']}v)")
+        # セカンダリ VB を units に自動追加 (CopyDispatch を自動生成するため)。
+        # キャラロード直後のフレームだけ使われる口などのセカンダリ VB を
+        # 登録しておくと、ロード直後に素のメッシュが一瞬表示される既知バグを防げる。
+        units = units_map_from_config_and_list(props)
+        secondary = find_secondary_vb0s(pairs, units)
+        added_items = []
+        for vb0, role in secondary.items():
+            if any(item.vb0 == vb0 for item in props.units_list):
+                continue
+            item = props.units_list.add()
+            item.vb0 = vb0
+            item.role = role
+            added_items.append((vb0, role))
+        if added_items:
+            detail = ", ".join(f"{v} ({r})" for v, r in added_items)
+            self.report({'INFO'},
+                        f"Secondary VB {len(added_items)} 件を units に自動追加: "
+                        f"{detail}")
         return {'FINISHED'}
 
 

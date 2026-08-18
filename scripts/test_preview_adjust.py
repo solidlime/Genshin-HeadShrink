@@ -1416,17 +1416,18 @@ class PositionVbScanTest(unittest.TestCase):
             hs.scan_dump_dir(d)
             self.assertEqual(hs._dump_cache['position_vb'], {})
 
-    def test_real_noelle_dump_recognizes_hashless_position_vb(self):
-        # Noelle 8/18 ダンプは vb0 ハッシュなし形式 (000001-vb0-vs=...) のため、
-        # position_vb のキーは DEFAULT_POSITION_VS になる。
+    def test_real_noelle_dump_recognizes_body_position_vb(self):
+        # Noelle 実ダンプの BODY position_vb (15965 verts) が検出されること。
+        # 形式は vb0 ハッシュ付き (d1384d15) でもハッシュなしでも可。
         real = os.path.normpath(os.path.join(
             SCRIPT_DIR, '..', 'assets', 'Dump', 'Noelle'))
         if not os.path.isdir(real):
             self.skipTest('real Noelle dump not present')
         hs.scan_dump_dir(real)
         pv = hs._dump_cache['position_vb']
-        self.assertIn(hs.DEFAULT_POSITION_VS, pv)
-        self.assertEqual(pv[hs.DEFAULT_POSITION_VS]['vert_count'], 15965)
+        body = next((info for info in pv.values()
+                     if info['vert_count'] == 15965), None)
+        self.assertIsNotNone(body)
 
 
 class FindPositionVbTest(unittest.TestCase):
@@ -1464,6 +1465,176 @@ class FindPositionVbTest(unittest.TestCase):
 
     def test_missing_position_vb_key_returns_none(self):
         self.assertIsNone(hs.find_position_vb({'pairs': []}, 'def7af36', 15965))
+
+
+class ScanDumpDirSubdirTest(unittest.TestCase):
+    """scan_dump_dir: サブディレクトリ再帰 + vs 抽出。"""
+
+    def _make_pair(self, d, frame, vb0, ib, vs='653c63ba4a73ca8b'):
+        # vb0 ファイル (stride 40 → 2 verts = 80 bytes)
+        with open(os.path.join(d, f'{frame}-vb0={vb0}-vs={vs}.buf'), 'wb') as f:
+            f.write(b'\x00' * 80)
+        # ib ファイル (2 bytes/index → 3 indices = 6 bytes)
+        with open(os.path.join(d, f'{frame}-ib={ib}-vs={vs}.buf'), 'wb') as f:
+            f.write(b'\x00' * 6)
+
+    def test_pairs_in_subdir(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, 'FrameAnalysis-1')
+            os.makedirs(sub)
+            self._make_pair(sub, '000001', 'aaaa1111', 'bbbb2222')
+            out = hs.scan_dump_dir(d)
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0]['vb0'], 'aaaa1111')
+            self.assertEqual(out[0]['ib'], 'bbbb2222')
+            # vs は vb0 ファイル名の -vs=<hash> から先頭 8 hex を抽出
+            self.assertEqual(out[0]['vs'], '653c63ba')
+            self.assertTrue(out[0]['vb0_path'].startswith(sub))
+
+    def test_root_and_sub_both(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, 'FrameAnalysis-1')
+            os.makedirs(sub)
+            self._make_pair(d, '000001', 'aaaa1111', 'bbbb2222')
+            self._make_pair(sub, '000001', 'cccc3333', 'dddd4444')
+            out = hs.scan_dump_dir(d)
+            vb0s = {p['vb0'] for p in out}
+            self.assertEqual(vb0s, {'aaaa1111', 'cccc3333'})
+
+    def test_same_pair_dedup_across_subdirs(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub1 = os.path.join(d, 'FrameAnalysis-1')
+            sub2 = os.path.join(d, 'FrameAnalysis-2')
+            os.makedirs(sub1)
+            os.makedirs(sub2)
+            self._make_pair(sub1, '000001', 'aaaa1111', 'bbbb2222')
+            self._make_pair(sub2, '000001', 'aaaa1111', 'bbbb2222')
+            out = hs.scan_dump_dir(d)
+            self.assertEqual(len(out), 1)
+
+    def test_hashless_position_vb_in_subdir(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, 'FrameAnalysis-1')
+            os.makedirs(sub)
+            with open(os.path.join(
+                    sub, '000001-vb0-vs=653c63ba4a73ca8b.buf'), 'wb') as f:
+                f.write(b'\x00' * 80)  # 2 verts
+            hs.scan_dump_dir(d)
+            pv = hs._dump_cache['position_vb']
+            self.assertIn(hs.DEFAULT_POSITION_VS, pv)
+            self.assertEqual(pv[hs.DEFAULT_POSITION_VS]['vert_count'], 2)
+
+
+class FindSecondaryVb0sTest(unittest.TestCase):
+    """find_secondary_vb0s: 同一 (ib, vs) グループのセカンダリ VB を検出。"""
+
+    def test_secondary_returned_with_role(self):
+        pairs = [
+            {'vb0': '5c536604', 'ib': '11111111', 'vs': '653c63ba'},
+            {'vb0': 'efa4da64', 'ib': '11111111', 'vs': '653c63ba'},
+        ]
+        units = {'5c536604': 'MOUTH'}
+        self.assertEqual(hs.find_secondary_vb0s(pairs, units),
+                         {'efa4da64': 'MOUTH'})
+
+    def test_unregistered_group_excluded(self):
+        pairs = [
+            {'vb0': 'aaaa1111', 'ib': '11111111', 'vs': '653c63ba'},
+            {'vb0': 'bbbb2222', 'ib': '11111111', 'vs': '653c63ba'},
+        ]
+        units = {'cccc3333': 'BODY'}  # グループ外
+        self.assertEqual(hs.find_secondary_vb0s(pairs, units), {})
+
+    def test_single_vb0_group_excluded(self):
+        pairs = [{'vb0': 'aaaa1111', 'ib': '11111111', 'vs': '653c63ba'}]
+        units = {'aaaa1111': 'MOUTH'}
+        self.assertEqual(hs.find_secondary_vb0s(pairs, units), {})
+
+    def test_empty_units_returns_empty(self):
+        pairs = [
+            {'vb0': 'aaaa1111', 'ib': '11111111', 'vs': '653c63ba'},
+            {'vb0': 'bbbb2222', 'ib': '11111111', 'vs': '653c63ba'},
+        ]
+        self.assertEqual(hs.find_secondary_vb0s(pairs, {}), {})
+
+    def test_merges_across_groups(self):
+        pairs = [
+            {'vb0': '5c536604', 'ib': '11111111', 'vs': '653c63ba'},
+            {'vb0': 'efa4da64', 'ib': '11111111', 'vs': '653c63ba'},
+            {'vb0': 'aaaa1111', 'ib': '22222222', 'vs': '653c63ba'},
+            {'vb0': 'bbbb2222', 'ib': '22222222', 'vs': '653c63ba'},
+        ]
+        units = {'5c536604': 'MOUTH', 'aaaa1111': 'EYES'}
+        self.assertEqual(hs.find_secondary_vb0s(pairs, units),
+                         {'efa4da64': 'MOUTH', 'bbbb2222': 'EYES'})
+
+
+class AnalyzeDumpSecondaryAddTest(unittest.TestCase):
+    """NHS_OT_AnalyzeDump: セカンダリ VB を units に自動追加。"""
+
+    def _run(self, existing_vb0s=()):
+        class _Item:
+            def __init__(self):
+                self.vb0 = ''
+                self.role = ''
+
+        class _List:
+            def __init__(self, items):
+                self.items = list(items)
+
+            def add(self):
+                item = _Item()
+                self.items.append(item)
+                return item
+
+            def __iter__(self):
+                return iter(self.items)
+
+        units_list = _List(existing_vb0s)
+        props = types.SimpleNamespace(
+            char_name='Noelle', units_list=units_list,
+            dump_pairs=types.SimpleNamespace(
+                clear=lambda: None,
+                add=lambda: types.SimpleNamespace(
+                    pair_name='', vb0='', ib='', vert_count=0)),
+            dump_pair='NONE')
+        pairs = [
+            {'vb0': '5c536604', 'ib': '11111111', 'vs': '653c63ba',
+             'vert_count': 100},
+            {'vb0': 'efa4da64', 'ib': '11111111', 'vs': '653c63ba',
+             'vert_count': 100},
+        ]
+        tmp = tempfile.mkdtemp()
+        saved = (hs.scan_dump_dir, hs.units_map_from_config_and_list,
+                 hs.bpy.path.abspath)
+        hs.scan_dump_dir = lambda dump_dir: pairs
+        hs.units_map_from_config_and_list = lambda props: {'5c536604': 'MOUTH'}
+        hs.bpy.path.abspath = lambda p: p
+        try:
+            op = types.SimpleNamespace(report=lambda level, msg: None)
+            result = hs.NHS_OT_AnalyzeDump.execute(op, types.SimpleNamespace(
+                scene=types.SimpleNamespace(headshrink_props=props),
+                preferences=types.SimpleNamespace(addons={
+                    hs.__name__: types.SimpleNamespace(
+                        preferences=types.SimpleNamespace(dump_dir=tmp))})))
+        finally:
+            (hs.scan_dump_dir, hs.units_map_from_config_and_list,
+             hs.bpy.path.abspath) = saved
+        return result, units_list
+
+    def test_secondary_added_to_units_list(self):
+        result, units_list = self._run()
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(len(units_list.items), 1)
+        self.assertEqual(units_list.items[0].vb0, 'efa4da64')
+        self.assertEqual(units_list.items[0].role, 'MOUTH')
+
+    def test_existing_vb0_skipped(self):
+        # 既に units_list に efa4da64 がある場合は追加しない
+        existing = [types.SimpleNamespace(vb0='efa4da64', role='MOUTH')]
+        result, units_list = self._run(existing_vb0s=existing)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(len(units_list.items), 1)
 
 
 class ExportPositionVbIniTest(unittest.TestCase):
