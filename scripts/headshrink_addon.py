@@ -1272,46 +1272,6 @@ class NHS_OT_UnitsRemove(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class NHS_OT_UnitsSave(bpy.types.Operator):
-    bl_idname = "headshrink.units_save"
-    bl_label = "Units Save"
-    bl_description = "Save the units list into face_offsets.json for the current character"
-
-    def execute(self, context):
-        props = context.scene.headshrink_props
-        char_name = props.char_name.strip()
-        if not char_name:
-            self.report({'ERROR'}, "Character name is empty")
-            return {'CANCELLED'}
-        path = face_offsets_path()
-        cfg = load_char_config(path, char_name)
-        cfg['units'] = {item.vb0: item.role for item in props.units_list}
-        save_char_config(path, char_name, {}, cfg)
-        self.report({'INFO'}, f"Units saved for {char_name}: "
-                              f"{len(props.units_list)} entries。③ セットアップで表示")
-        return {'FINISHED'}
-
-
-class NHS_OT_UnitsLoad(bpy.types.Operator):
-    bl_idname = "headshrink.units_load"
-    bl_label = "Units Load"
-    bl_description = "Load the saved units of the current character into the list"
-
-    def execute(self, context):
-        props = context.scene.headshrink_props
-        char_name = props.char_name.strip()
-        units = load_char_config(face_offsets_path(), char_name).get('units', {})
-        props.units_list.clear()
-        for vb0, role in units.items():
-            item = props.units_list.add()
-            item.vb0 = str(vb0)
-            item.role = str(role)
-        props.units_list_index = 0
-        self.report({'INFO'}, f"Units loaded: {len(props.units_list)} entries "
-                              f"for {char_name}。③ セットアップを押すとモデル表示")
-        return {'FINISHED'}
-
-
 def _import_pair(context, pair, units_map=None):
     """Import one dump pair into HeadShrink_Dump with role assignment.
 
@@ -1760,6 +1720,18 @@ def _auto_face_shrink_center(props, meshes):
         props.shrink_center = (props.shrink_center[0], face_c[1], face_c[2] + 0.1)
 
 
+def _median(values):
+    """数値リストの中央値を返す (偶数個は中間2つの平均、空は 0.0)。"""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
 def _preview_setup_impl(self, context):
     """Shared Preview Setup body (NHS_OT_PreviewSetup / NHS_OT_AutoSetup).
 
@@ -1817,6 +1789,7 @@ def _preview_setup_impl(self, context):
                 body_pos_verts = [tuple(v.co) for v in main.data.vertices]
             else:
                 use_pv_placement = False
+        locs = []
         if use_pv_placement:
             # 顔メッシュを draw_vb → position_vb 空間に近似配置 (loc のみ変更、
             # v.co は draw_vb 空間のまま → export は loc と独立)。
@@ -1826,7 +1799,17 @@ def _preview_setup_impl(self, context):
                 loc = _face_draw_to_body_space(o, body_draw_verts,
                                                body_pos_verts)
                 if loc is not None:
-                    o.location = loc
+                    locs.append(loc)
+        if use_pv_placement and locs:
+            # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
+            # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
+            # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
+            common_loc = tuple(
+                _median([loc[i] for loc in locs]) for i in range(3))
+            for o in preview_objs:
+                if o is main:
+                    continue
+                o.location = common_loc
         else:
             head_center = head_center_from_verts(
                 [tuple(v.co) for v in main.data.vertices])
@@ -1841,6 +1824,11 @@ def _preview_setup_impl(self, context):
                         sum(p[i] for p in verts) / len(verts) for i in range(3))
                     o.location = tuple(head_center[i] - face_center[i]
                                        for i in range(3))
+        # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
+        # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
+        for o in preview_objs:
+            if o is not main:
+                o.rotation_euler = (0.0, 0.0, math.pi)
         # Re-apply saved per-character face offsets if any (overrides auto
         # placement with the user's G-key tweaks from a previous session).
         saved = load_face_offsets(face_offsets_path(),
@@ -2375,9 +2363,7 @@ class NHS_PT_Panel(bpy.types.Panel):
                           "units_list", props, "units_list_index", rows=3)
         row = box.row()
         row.operator("headshrink.units_remove", icon='X')
-        row.operator("headshrink.units_load", icon='FILE_REFRESH')
-        row.operator("headshrink.units_save", icon='FILE_TICK')
-        box.label(text="登録したら【保存】→ ③ セットアップで表示。"
+        box.label(text="登録したら ③ セットアップで表示 (保存不要・即時反映)。"
                        "フィールドのみならボディ 1 つで OK。"
                        "UI 画面も縮めるなら目/口/眉も登録",
                   icon='INFO')
@@ -2454,8 +2440,6 @@ classes = (
     NHS_OT_UnitsAdd,
     NHS_OT_UnitsAddPair,
     NHS_OT_UnitsRemove,
-    NHS_OT_UnitsSave,
-    NHS_OT_UnitsLoad,
     NHS_OT_ImportDump,
     NHS_OT_ImportAll,
     NHS_OT_AutoSetup,

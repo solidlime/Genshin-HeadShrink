@@ -1787,6 +1787,139 @@ class FaceOriginSaveTest(unittest.TestCase):
         self.assertNotIn('hs_face_origin', copied['Dump_body']._props)
 
 
+class AutoSetupCommonLocTest(unittest.TestCase):
+    """_preview_setup_impl (use_pv_placement): 顔メッシュ共通移動量 (中央値) と
+    Z 軸 180° 回転。"""
+
+    def _run(self, face_locs):
+        class _Mesh:
+            def __init__(self, n, co):
+                self.vertices = [types.SimpleNamespace(co=co)] * n
+                self._attrs = {}
+            def copy(self):
+                return _Mesh(len(self.vertices), tuple(self.vertices[0].co))
+            def update(self):
+                pass
+            @property
+            def attributes(self):
+                return self
+            def new(self, name, type, domain):
+                self._attrs[name] = types.SimpleNamespace(
+                    data=types.SimpleNamespace(foreach_set=lambda *a: None))
+                return self._attrs[name]
+
+        class _Obj:
+            def __init__(self, name, n, role, co):
+                self.name = name
+                self.type = 'MESH'
+                self.location = [0.0, 0.0, 0.0]
+                self.rotation_euler = [0.0, 0.0, 0.0]
+                self.scale = [1.0, 1.0, 1.0]
+                self.data = _Mesh(n, co)
+                self._props = {'hs_vb0_hash': name, 'hs_role': role}
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+            def __getitem__(self, key):
+                return self._props[key]
+            def __setitem__(self, key, value):
+                self._props[key] = value
+
+        class _ObjList(list):
+            def link(self, obj):
+                self.append(obj)
+
+        body = _Obj('Dump_body', 100, 'BODY', (0.0, 0.0, 0.0))
+        body._props['hs_position_vb'] = 'pos'  # use_pv_placement を有効化
+        eyes = _Obj('Dump_eyes', 50, 'EYES', (1.0, 1.0, 1.0))
+        mouth = _Obj('Dump_mouth', 40, 'MOUTH', (1.0, 1.0, 1.0))
+        brow = _Obj('Dump_brow', 30, 'BROW', (1.0, 1.0, 1.0))
+        src = types.SimpleNamespace(objects=[body, eyes, mouth, brow])
+        coll = types.SimpleNamespace(objects=_ObjList())
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: src if name == 'HeadShrink_Dump' else None,
+            new=lambda name: coll)
+
+        def _new_obj(name, mesh):
+            # コピーされた BODY (main) に hs_position_vb を付与して
+            # use_pv_placement パスを有効化する (コピーは src の
+            # hs_position_vb を引き継がないため、ここで注入する)
+            o = _Obj(name, len(mesh.vertices), 'OTHER',
+                     tuple(mesh.vertices[0].co))
+            if name == 'Dump_body':
+                o._props['hs_position_vb'] = 'pos'
+            return o
+
+        hs.bpy.data.objects = types.SimpleNamespace(new=_new_obj)
+        context = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                collection=types.SimpleNamespace(
+                    children=types.SimpleNamespace(link=lambda c: None)),
+                headshrink_props=types.SimpleNamespace(
+                    shrink_center=(0.0, 0.0, 0.0),
+                    shrink_half=(1.0, 1.0, 1.0),
+                    char_name='Noelle')),
+            screen=None)
+        op = types.SimpleNamespace(report=lambda level, msg: None)
+        saved = (hs.load_face_offsets, hs._match_face_offsets,
+                 hs._auto_face_shrink_center, hs._create_shrink_box,
+                 hs._load_body_draw_verts, hs._face_draw_to_body_space)
+        hs.load_face_offsets = lambda *a, **k: {}
+        hs._match_face_offsets = lambda *a, **k: {}
+        hs._auto_face_shrink_center = lambda *a, **k: None
+        hs._create_shrink_box = lambda *a, **k: None
+        hs._load_body_draw_verts = lambda main: [(0.0, 0.0, 0.0)]
+        hs._face_draw_to_body_space = (
+            lambda o, bd, bp: face_locs.get(o.name))
+        try:
+            result = hs._preview_setup_impl(op, context)
+        finally:
+            (hs.load_face_offsets, hs._match_face_offsets,
+             hs._auto_face_shrink_center, hs._create_shrink_box,
+             hs._load_body_draw_verts, hs._face_draw_to_body_space) = saved
+        copied = {o.name: o for o in coll.objects}
+        return result, copied
+
+    def test_common_median_applied_to_all_faces(self):
+        # 3 顔すべて有効 loc → 各軸中央値が全顔に適用される
+        result, copied = self._run({
+            'Dump_eyes': (0.0, 0.0, 0.0),
+            'Dump_mouth': (0.0, 2.0, 0.0),
+            'Dump_brow': (0.0, 4.0, 0.0),
+        })
+        self.assertEqual(result, {'FINISHED'})
+        common = (0.0, 2.0, 0.0)  # y の中央値
+        for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
+            self.assertEqual(tuple(copied[name].location), common)
+            # 変更3: 顔メッシュは Z 軸 180° 回転
+            self.assertEqual(tuple(copied[name].rotation_euler),
+                             (0.0, 0.0, hs.math.pi))
+        # BODY は回転しない
+        self.assertEqual(tuple(copied['Dump_body'].rotation_euler),
+                         (0.0, 0.0, 0.0))
+
+    def test_mixed_none_uses_median_of_valid(self):
+        # None の顔が混ざっても有効分の中央値を全顔に適用
+        result, copied = self._run({
+            'Dump_eyes': (0.0, 0.0, 0.0),
+            'Dump_mouth': None,
+            'Dump_brow': (0.0, 4.0, 0.0),
+        })
+        self.assertEqual(result, {'FINISHED'})
+        common = (0.0, 2.0, 0.0)  # 有効 2 つの y 中央値
+        for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
+            self.assertEqual(tuple(copied[name].location), common)
+
+    def test_zero_valid_falls_back_to_head_center(self):
+        # 有効 loc 0 件 → head_center フォールバック (個別配置)
+        result, copied = self._run({
+            'Dump_eyes': None, 'Dump_mouth': None, 'Dump_brow': None,
+        })
+        self.assertEqual(result, {'FINISHED'})
+        # head_center=(0,0,0)、顔 center=(1,1,1) → loc=(-1,-1,-1)
+        for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
+            self.assertEqual(tuple(copied[name].location), (-1.0, -1.0, -1.0))
+
+
 class BoxCenterPivotTest(unittest.TestCase):
     """v2.0.0: BODY 縮小の pivot は box 中央固定 (shrink_origin 非依存)。"""
 
