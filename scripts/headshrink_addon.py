@@ -981,12 +981,23 @@ def _face_snap_update(self, context):
     _apply_snap_settings(context, self.face_snap_enabled)
 
 
-class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.props)
+class NHSAddonPreferences(bpy.types.AddonPreferences):
+    """アドオン全体のグローバル設定 (userpref.blend に保存され再起動後も復元)。
+
+    シーン (.blend) に依存しない設定を置く。mod 出力先はここで管理する
+    (旧: シーン props の output_dir。既存 .blend の旧値は引き継がれず
+    デフォルトに戻るが仕様として許容)。
+    """
+    bl_idname = __name__
+
     output_dir: bpy.props.StringProperty(
-        name="Output Dir",
+        name="Mod Output Dir",
         default=r"G:\XXMI-Launcher-Portable\Mods\Mods\HeadShrink\assets\Preview",
         subtype='DIR_PATH',
     )
+
+
+class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.props)
     # ---- 3DMigoto dump workflow ----
     position_vs: bpy.props.StringProperty(
         name="Skinning VS Hash",
@@ -2140,7 +2151,9 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.headshrink_props
         char_name = props.char_name.strip() or 'Char'
-        output_dir = os.path.join(bpy.path.abspath(props.output_dir), char_name)
+        # 出力先は AddonPreferences (userpref.blend 保存・再起動後も復元)
+        prefs = context.preferences.addons[__name__].preferences
+        output_dir = os.path.join(bpy.path.abspath(prefs.output_dir), char_name)
         coll = bpy.data.collections.get(PREVIEW_COLLECTION)
         if coll is None:
             self.report({'ERROR'}, f"No {PREVIEW_COLLECTION} collection (Preview Setup first)")
@@ -2412,7 +2425,8 @@ class NHS_PT_Panel(bpy.types.Panel):
         # ---- Step 5: mod 生成 (出力) ----
         box = layout.box()
         box.label(text="⑤ mod 生成 (出力)", icon='EXPORT')
-        box.prop(props, "output_dir")
+        prefs = context.preferences.addons[__name__].preferences
+        box.prop(prefs, "output_dir")
         box.label(text="VB Replace (Bennett): ボディは VB 置換 (アニメ追従・隙間対策)。"
                        "顔パーツは CopyDispatch", icon='INFO')
         box.operator("headshrink.export_diff", icon='EXPORT')
@@ -2424,6 +2438,7 @@ classes = (
     NHSDumpPairItem,
     HS_UL_UnitsList,
     HS_UL_DumpPairList,
+    NHSAddonPreferences,
     NHSProps,
     NHS_OT_AnalyzeDump,
     NHS_OT_UnitsAdd,

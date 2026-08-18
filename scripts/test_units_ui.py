@@ -42,7 +42,8 @@ if 'bpy' not in sys.modules:
 
     bpy_stub.props = props
     bpy_stub.types = types.SimpleNamespace(
-        PropertyGroup=_Base, Operator=_Base, Panel=_Base, UIList=_Base)
+        PropertyGroup=_Base, Operator=_Base, Panel=_Base, UIList=_Base,
+        AddonPreferences=_Base)
     bpy_stub.utils = types.SimpleNamespace(
         register_class=lambda c: None, unregister_class=lambda c: None)
     bpy_stub.path = types.SimpleNamespace(abspath=lambda p: p)
