@@ -987,22 +987,6 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         default=r"G:\XXMI-Launcher-Portable\Mods\Mods\HeadShrink\assets\Preview",
         subtype='DIR_PATH',
     )
-    export_mode: bpy.props.EnumProperty(
-        name="Export Mode",
-        description="VB Replace (Bennett): the body is exported as a vb0 "
-                    "position-buffer override so the game VS re-skins it "
-                    "every frame (animations follow, no gaps); face parts "
-                    "use CopyDispatch. CopyDispatch (legacy): all units via "
-                    "CopyDispatch delta shader",
-        items=[
-            ('VB_REPLACE', 'VB Replace (Bennett)',
-             'Body via vb0 position buffer replacement, face via CopyDispatch '
-             '(animations follow)'),
-            ('COPY_DISPATCH', 'CopyDispatch (legacy)',
-             'All units via CopyDispatch'),
-        ],
-        default='VB_REPLACE',
-    )
     # ---- 3DMigoto dump workflow ----
     position_vs: bpy.props.StringProperty(
         name="Skinning VS Hash",
@@ -2163,7 +2147,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             return {'CANCELLED'}
         os.makedirs(output_dir, exist_ok=True)
         cleared = _clean_export_dir(output_dir, char_name)
-        mode = props.export_mode
+        mode = 'VB_REPLACE'  # 固定 (VB Replace (Bennett) のみサポート)
         meshes = [o for o in coll.objects
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
@@ -2429,8 +2413,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="⑤ mod 生成 (出力)", icon='EXPORT')
         box.prop(props, "output_dir")
-        box.prop(props, "export_mode")
-        box.label(text="VB Replace: ボディは VB 置換 (アニメ追従・隙間対策)。"
+        box.label(text="VB Replace (Bennett): ボディは VB 置換 (アニメ追従・隙間対策)。"
                        "顔パーツは CopyDispatch", icon='INFO')
         box.operator("headshrink.export_diff", icon='EXPORT')
 
