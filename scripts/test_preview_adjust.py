@@ -598,24 +598,6 @@ class PositionBufTest(unittest.TestCase):
                              (0.5, 0.5, 0.5))
             self.assertEqual(out[v * 40 + 24:v * 40 + 40], b'\xAA' * 16)
 
-    def test_find_dump_vb0_path_cache_hit(self):
-        cache = [{'vb0': 'def7af36', 'vb0_path': r'C:\d\a.buf'}]
-        self.assertEqual(hs.find_dump_vb0_path('X', 'def7af36', cache),
-                         r'C:\d\a.buf')
-
-    def test_find_dump_vb0_path_glob_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = os.path.join(tmp, '000124-vb0=def7af36-vs=x.buf')
-            with open(p, 'wb') as f:
-                f.write(b'\x00' * 40)
-            got = hs.find_dump_vb0_path(tmp, 'def7af36', None)
-            self.assertEqual(got, p)
-
-    def test_find_dump_vb0_path_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(hs.find_dump_vb0_path(tmp, 'deadbeef', None))
-
-
 class ShrinkShiftTest(unittest.TestCase):
     def test_zero_shift_legacy_behavior(self):
         # shift=(0,0,0) keeps legacy: in-box scaled, outside unchanged
@@ -1393,6 +1375,10 @@ class PositionVbScanTest(unittest.TestCase):
         with open(os.path.join(d, '000001-vb0=d1384d15-vs=653c63ba4a73ca8b.buf'),
                   'wb') as f:
             f.write(vb * 4)
+        # ハッシュなし形式の position_vb (vb0 ハッシュ無し): 2 verts
+        with open(os.path.join(d, '000001-vb0-vs=653c63ba4a73ca8b.buf'),
+                  'wb') as f:
+            f.write(vb * 2)
         # VS 不一致の vb0 (position_vb ではない)
         with open(os.path.join(d, f'000001-vb0=aaaa1111-vs={self.DRAW_VS}.buf'),
                   'wb') as f:
@@ -1415,20 +1401,32 @@ class PositionVbScanTest(unittest.TestCase):
         self.assertNotIn('aaaa1111', pv)
         self.assertNotIn('def7af36', pv)  # draw vb0 も対象外
 
+    def test_hashless_position_vb_recorded(self):
+        # ハッシュなし形式 (000001-vb0-vs=...) も position_vb として記録される
+        d = self._make_dump_dir()
+        hs.scan_dump_dir(d)
+        pv = hs._dump_cache['position_vb']
+        self.assertIn(hs.DEFAULT_POSITION_VS, pv)
+        self.assertEqual(pv[hs.DEFAULT_POSITION_VS]['vert_count'], 2)
+        self.assertTrue(
+            pv[hs.DEFAULT_POSITION_VS]['path'].endswith('653c63ba4a73ca8b.buf'))
+
     def test_empty_dir_no_position_vb(self):
         with tempfile.TemporaryDirectory() as d:
             hs.scan_dump_dir(d)
             self.assertEqual(hs._dump_cache['position_vb'], {})
 
-    def test_real_noelle_dump_recognizes_d1384d15(self):
+    def test_real_noelle_dump_recognizes_hashless_position_vb(self):
+        # Noelle 8/18 ダンプは vb0 ハッシュなし形式 (000001-vb0-vs=...) のため、
+        # position_vb のキーは DEFAULT_POSITION_VS になる。
         real = os.path.normpath(os.path.join(
             SCRIPT_DIR, '..', 'assets', 'Dump', 'Noelle'))
         if not os.path.isdir(real):
             self.skipTest('real Noelle dump not present')
         hs.scan_dump_dir(real)
         pv = hs._dump_cache['position_vb']
-        self.assertIn('d1384d15', pv)
-        self.assertEqual(pv['d1384d15']['vert_count'], 15965)
+        self.assertIn(hs.DEFAULT_POSITION_VS, pv)
+        self.assertEqual(pv[hs.DEFAULT_POSITION_VS]['vert_count'], 15965)
 
 
 class FindPositionVbTest(unittest.TestCase):
@@ -1447,6 +1445,17 @@ class FindPositionVbTest(unittest.TestCase):
         self.assertEqual(out['path'], 'x.buf')
         self.assertEqual(out['vert_count'], 15965)
 
+    def test_hashless_position_vb_found_by_vert_count(self):
+        # ハッシュなし形式 (キー = position_vs) も頂点数一致で返る
+        cache = {'position_vb': {
+            hs.DEFAULT_POSITION_VS: {'path': 'z.buf', 'vert_count': 2,
+                                     'vs': hs.DEFAULT_POSITION_VS},
+        }}
+        out = hs.find_position_vb(cache, 'def7af36', 2)
+        self.assertEqual(out['vb_hash'], hs.DEFAULT_POSITION_VS)
+        self.assertEqual(out['path'], 'z.buf')
+        self.assertEqual(out['vert_count'], 2)
+
     def test_mismatch_returns_none(self):
         self.assertIsNone(hs.find_position_vb(self.CACHE, 'def7af36', 999))
 
@@ -1460,8 +1469,8 @@ class FindPositionVbTest(unittest.TestCase):
 class ExportPositionVbIniTest(unittest.TestCase):
     """BODY + position_vb 対応時: ini の TextureOverride hash は position_vb。
 
-    フォールバック (position_vb 無し) では従来の draw_vb hash のまま。
-    build_diff_ini は units の vb_hash をそのまま使う。
+    build_diff_ini は units の vb_hash をそのまま使う (BODY は position_vb
+    の vb_hash、顔は draw_vb の vb_hash)。
     """
 
     def test_ini_uses_position_vb_hash(self):
@@ -1479,6 +1488,73 @@ class ExportPositionVbIniTest(unittest.TestCase):
         ini = hs.build_diff_ini('Noelle', units)
         self.assertIn('hash = def7af36', ini)
         self.assertNotIn('d1384d15', ini)
+
+
+class ExportBodyNoPositionVbTest(unittest.TestCase):
+    """BODY で position_vb が無い場合、ERROR + CANCELLED で何も書かない。"""
+
+    def test_body_missing_position_vb_cancels(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+
+        class _Attr:
+            def foreach_get(self, name, dest):
+                pass
+
+        class _Mesh:
+            def __init__(self):
+                self.vertices = [types.SimpleNamespace(co=(0.0, 0.0, 0.0))
+                                 for _ in range(100)]
+                self._attrs = {'hs_original_pos': _Attr()}
+
+            @property
+            def attributes(self):
+                return self
+
+            def get(self, name):
+                return self._attrs.get(name)
+
+        class _BodyObj:
+            def __init__(self):
+                self.type = 'MESH'
+                self.name = 'Dump_body'
+                self.data = _Mesh()
+                self._props = {'hs_vb0_hash': 'def7af36', 'hs_role': 'BODY'}
+
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+
+            def __getitem__(self, key):
+                return self._props[key]
+
+        body = _BodyObj()
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: (types.SimpleNamespace(objects=[body])
+                              if name == 'HS_Preview' else None))
+        saved = (hs.bpy.path.abspath, hs._clean_export_dir,
+                 hs.find_position_vb)
+        hs.bpy.path.abspath = lambda p: p
+        hs._clean_export_dir = lambda *a, **k: 0
+        hs.find_position_vb = lambda *a, **k: None
+        reports = []
+        context = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                headshrink_props=types.SimpleNamespace(
+                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS)),
+            preferences=types.SimpleNamespace(
+                addons={hs.__name__: types.SimpleNamespace(
+                    preferences=types.SimpleNamespace(output_dir=tmp))}))
+        op = types.SimpleNamespace(
+            report=lambda level, msg: reports.append(level))
+        try:
+            result = hs.NHS_OT_ExportDiff.execute(op, context)
+        finally:
+            (hs.bpy.path.abspath, hs._clean_export_dir,
+             hs.find_position_vb) = saved
+        self.assertEqual(result, {'CANCELLED'})
+        self.assertIn({'ERROR'}, reports)
+        # 出力ディレクトリ (tmp/Noelle) にファイルが書かれていない
+        self.assertEqual(os.listdir(os.path.join(tmp, 'Noelle')), [])
 
 
 class PositionVbTransformTest(unittest.TestCase):

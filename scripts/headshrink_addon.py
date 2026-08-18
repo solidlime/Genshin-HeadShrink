@@ -97,13 +97,17 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     vs_re = re.compile(rf'-vs={re.escape(position_vs)}(?:-|\.)')
     for fn in names:
         low = fn.lower()
-        if not (low.endswith('.buf') and 'vb0=' in low
+        # vb0 ファイル (ハッシュ付き -vb0= または ハッシュなし -vb0-) かつ
+        # スキニングパスの VS 一致のみ position_vb として記録。
+        if not (low.endswith('.buf') and ('vb0=' in low or '-vb0-' in low)
                 and vs_re.search(low)):
             continue
         m = re.search(r'vb0=([0-9a-f]{8})', low)
-        if not m:
-            continue
-        h = m.group(1)
+        if m:
+            h = m.group(1)
+        else:
+            # ハッシュなし形式 (000001-vb0-vs=...): position_vs をキーに使う
+            h = position_vs
         if h in position_vb:
             continue
         path = os.path.join(dump_dir, fn)
@@ -350,28 +354,6 @@ def build_position_buf(dump_bytes, game_verts, stride=DUMP_STRIDE):
     for v, p in enumerate(game_verts):
         struct.pack_into('<3f', out, v * stride, *p)
     return bytes(out)
-
-
-def find_dump_vb0_path(dump_dir, vb_hash, dump_cache=None):
-    """Path of a dumped vb0 file for vb_hash.
-
-    Consults dump_cache (scan_dump_dir pairs) first, then falls back to
-    scanning dump_dir for '*vb0=<hash>-*.buf' filenames (several shader
-    variants may exist; the first match wins). None when not found.
-    """
-    vb_hash = str(vb_hash).lower()
-    if dump_cache:
-        for p in dump_cache:
-            if str(p.get('vb0', '')).lower() == vb_hash and p.get('vb0_path'):
-                return p['vb0_path']
-    try:
-        names = os.listdir(dump_dir)
-    except OSError:
-        return None
-    for fn in names:
-        if fn.lower().endswith('.buf') and f'vb0={vb_hash}' in fn.lower():
-            return os.path.join(dump_dir, fn)
-    return None
 
 
 def find_position_vb(dump_cache, vb_hash, vert_count):
@@ -2221,7 +2203,6 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         meshes = [o for o in coll.objects
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
-        fallback_names = []
         for obj in meshes:
             vb0 = obj['hs_vb0_hash']
             mesh = obj.data
@@ -2239,46 +2220,36 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             if mode == 'VB_REPLACE' and role == 'BODY':
                 # Prefer the pre-skin position buffer (same vertex count):
                 # overriding it makes the game VS re-skin every frame, so the
-                # body follows animations exactly. Fall back to the draw vb0
-                # (static pose) when no position_vb was scanned.
+                # body follows animations exactly. No fallback: the draw vb0
+                # (static pose) or CopyDispatch would break in-game, so abort.
                 position_vb = find_position_vb(
                     _dump_cache, vb0, vert_count)
-                dump_hash, dump_path = vb0, None
-                pv_verts = verts  # draw_vb fallback: game space
-                if position_vb is not None:
-                    dump_hash = position_vb['vb_hash']
-                    dump_path = position_vb['path']
-                    # position_vb is y-up model-local, not game space: write
-                    # back in that frame so the game VS re-skins correctly.
-                    pv_verts = [display_to_position_vb(tuple(v.co))
-                                for v in mesh.vertices]
-                else:
-                    dump_path = find_dump_vb0_path(
-                        prefs.dump_dir, vb0, _dump_cache.get('pairs'))
-                    if dump_path is not None:
-                        self.report({'WARNING'},
-                                    f"{name}: no position_vb for {vb0} "
-                                    f"(skinning vs={props.position_vs}); "
-                                    f"using draw vb0 (static pose)")
-                if dump_path is not None:
-                    # Bennett-mimic: overwrite only the position float3 of
-                    # the real pre-skin vb0. normal/tangent stay from the
-                    # dump; the game VS re-skins the new positions, so the
-                    # body follows animations exactly.
-                    with open(dump_path, 'rb') as f:
-                        dump_bytes = f.read()
-                    pos_data = build_position_buf(dump_bytes, pv_verts)
-                    with open(os.path.join(output_dir, f"{name}Position.buf"),
-                              'wb') as f:
-                        f.write(pos_data)
-                    units.append({'name': name, 'vb_hash': dump_hash,
-                                  'vert_count': vert_count, 'role': 'BODY'})
-                    continue
-                # Dump vb0 missing -> fall back to CopyDispatch for this unit.
-                fallback_names.append(name)
-                self.report({'WARNING'},
-                            f"{name}: dump vb0 for {vb0} not found in "
-                            f"{prefs.dump_dir}; exporting via CopyDispatch")
+                if position_vb is None:
+                    self.report({'ERROR'}, f"{name}: pre-skin position_vb for "
+                                           f"{vb0} not found (skinning "
+                                           f"vs={props.position_vs}). The dump "
+                                           f"lacks the skinning pass vb0; "
+                                           f"re-dump and re-run Analyze Dump.")
+                    return {'CANCELLED'}
+                dump_hash = position_vb['vb_hash']
+                dump_path = position_vb['path']
+                # position_vb is y-up model-local, not game space: write
+                # back in that frame so the game VS re-skins correctly.
+                pv_verts = [display_to_position_vb(tuple(v.co))
+                            for v in mesh.vertices]
+                # Bennett-mimic: overwrite only the position float3 of
+                # the real pre-skin vb0. normal/tangent stay from the
+                # dump; the game VS re-skins the new positions, so the
+                # body follows animations exactly.
+                with open(dump_path, 'rb') as f:
+                    dump_bytes = f.read()
+                pos_data = build_position_buf(dump_bytes, pv_verts)
+                with open(os.path.join(output_dir, f"{name}Position.buf"),
+                          'wb') as f:
+                    f.write(pos_data)
+                units.append({'name': name, 'vb_hash': dump_hash,
+                              'vert_count': vert_count, 'role': 'BODY'})
+                continue
             # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
             flat = [0.0] * (vert_count * 3)
             attr.data.foreach_get('vector', flat)
@@ -2301,10 +2272,9 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
             f.write(build_diff_ini(char_name, units, mode))
-        extra = f"; CopyDispatch fallback: {', '.join(fallback_names)}" if fallback_names else ""
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
-                              f"{', '.join(u['name'] for u in units)}){extra}"
+                              f"{', '.join(u['name'] for u in units)})"
                               f"{'; cleared ' + str(cleared) + ' stale file(s)' if cleared else ''}")
         return {'FINISHED'}
 
