@@ -930,7 +930,9 @@ class CharConfigTest(unittest.TestCase):
             'shrink_falloff': 0.15,
             'shrink_shift': [0.0, 0.0, 0.0],
             'face_full_transform': True,
-            'face_offset': [0.0, 0.0, 0.0],
+            'face_offset_eye': [0.0, 0.0, 0.0],
+            'face_offset_mouth': [0.0, 0.0, 0.0],
+            'face_offset_brow': [0.0, 0.0, 0.0],
             'units': {'63f702ce': 'EYES', '6192fe1c': 'MOUTH'},
         }
 
@@ -998,13 +1000,17 @@ class CharConfigTest(unittest.TestCase):
             shrink_half=(0.5, 0.25, 0.35), shrink_scale=0.88,
             shrink_falloff=0.2, shrink_shift=(0.0, 0.0, 0.0),
             face_full_transform=False,
-            face_offset=(0.01, 0.02, 0.03),
+            face_offset_eye=(0.01, 0.02, 0.03),
+            face_offset_mouth=(0.04, 0.05, 0.06),
+            face_offset_brow=(0.07, 0.08, 0.09),
         )
         cfg = hs.extract_char_config(props)
         self.assertEqual(cfg['shrink_center'], [0.1, 0.2, 0.3])
         self.assertEqual(cfg['shrink_scale'], 0.88)
         self.assertFalse(cfg['face_full_transform'])
-        self.assertEqual(cfg['face_offset'], [0.01, 0.02, 0.03])
+        self.assertEqual(cfg['face_offset_eye'], [0.01, 0.02, 0.03])
+        self.assertEqual(cfg['face_offset_mouth'], [0.04, 0.05, 0.06])
+        self.assertEqual(cfg['face_offset_brow'], [0.07, 0.08, 0.09])
 
     def test_apply_char_config_partial(self):
         props = types.SimpleNamespace(
@@ -1658,16 +1664,18 @@ class FaceShrinkPivotTest(unittest.TestCase):
 
 
 class FaceOffsetApplyTest(unittest.TestCase):
-    """face_offset: 顔メッシュの v.co に加算、BODY には適用されない。"""
+    """face_offset_*: ロール別に顔メッシュの v.co へ加算、BODY には適用されない。"""
 
-    def _run_update(self, body_mesh, face_mesh, face_offset):
+    def _run_update(self, body_mesh, face_mesh, role, offsets):
         body = types.SimpleNamespace(
             type='MESH', data=body_mesh, location=(0.0, 0.0, 0.0),
             get=lambda key, default=None: default)
         face = types.SimpleNamespace(
             type='MESH', data=face_mesh, location=(0.0, 0.0, 0.0),
-            get=lambda key, default=None: (0.0, 0.0, 0.0)
-            if key == 'hs_face_origin' else default)
+            get=lambda key, default=None: {
+                'hs_face_origin': (0.0, 0.0, 0.0),
+                'hs_role': role,
+            }.get(key, default))
         hs.bpy.context.mode = 'OBJECT'
         hs.bpy.data.collections = types.SimpleNamespace(
             get=lambda name: (types.SimpleNamespace(objects=[body, face])
@@ -1678,29 +1686,57 @@ class FaceOffsetApplyTest(unittest.TestCase):
             props = types.SimpleNamespace(
                 shrink_center=(1.0, 1.0, 1.0), shrink_half=(1.0, 1.0, 1.0),
                 shrink_scale=0.5, shrink_falloff=0.0,
-                shrink_shift=(0.0, 0.0, 0.0), face_offset=face_offset)
+                shrink_shift=(0.0, 0.0, 0.0),
+                face_offset_eye=offsets.get('EYES', (0.0, 0.0, 0.0)),
+                face_offset_mouth=offsets.get('MOUTH', (0.0, 0.0, 0.0)),
+                face_offset_brow=offsets.get('BROW', (0.0, 0.0, 0.0)))
             hs._preview_props_update(props, None)
         finally:
             hs._sync_shrink_box = saved
         return body_mesh, face_mesh
 
-    def test_face_offset_applied_to_face_only(self):
+    def test_eye_offset_applied_to_eyes_only(self):
         body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
         face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
         body_mesh, face_mesh = self._run_update(
-            body_mesh, face_mesh, (0.1, 0.2, 0.3))
+            body_mesh, face_mesh, 'EYES', {'EYES': (0.1, 0.2, 0.3)})
         # BODY: 縮小のみ (face_offset 非適用)
         self.assertEqual([tuple(v.co) for v in body_mesh.vertices],
                          [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
-        # 顔: 縮小 (0.5,0.5,0.5) + face_offset (0.1,0.2,0.3)
+        # EYES: 縮小 (0.5,0.5,0.5) + face_offset_eye (0.1,0.2,0.3)
         self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
                          [(0.6, 0.7, 0.8)])
 
-    def test_zero_face_offset_no_change(self):
+    def test_mouth_offset_applied_to_mouth(self):
         body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
         face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
         body_mesh, face_mesh = self._run_update(
-            body_mesh, face_mesh, (0.0, 0.0, 0.0))
+            body_mesh, face_mesh, 'MOUTH', {'MOUTH': (0.1, 0.2, 0.3)})
+        self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
+                         [(0.6, 0.7, 0.8)])
+
+    def test_brow_offset_applied_to_brow(self):
+        body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
+        body_mesh, face_mesh = self._run_update(
+            body_mesh, face_mesh, 'BROW', {'BROW': (0.1, 0.2, 0.3)})
+        self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
+                         [(0.6, 0.7, 0.8)])
+
+    def test_other_role_not_offset(self):
+        # OTHER ロールはオフセット適用されない (縮小のみ)
+        body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
+        body_mesh, face_mesh = self._run_update(
+            body_mesh, face_mesh, 'OTHER', {'EYES': (0.1, 0.2, 0.3)})
+        self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
+                         [(0.5, 0.5, 0.5)])
+
+    def test_zero_offset_no_change(self):
+        body_mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
+        face_mesh = _FakeMesh([(0.0, 0.0, 0.0)])
+        body_mesh, face_mesh = self._run_update(
+            body_mesh, face_mesh, 'EYES', {'EYES': (0.0, 0.0, 0.0)})
         self.assertEqual([tuple(v.co) for v in face_mesh.vertices],
                          [(0.5, 0.5, 0.5)])
 
@@ -1896,6 +1932,18 @@ class AutoSetupCommonLocTest(unittest.TestCase):
         # BODY は回転しない
         self.assertEqual(tuple(copied['Dump_body'].rotation_euler),
                          (0.0, 0.0, 0.0))
+
+    def test_common_loc_x_forced_to_zero(self):
+        # 共通 loc の x は左右対称のため常に 0.0 に固定 (計算値は無視)
+        result, copied = self._run({
+            'Dump_eyes': (1.0, 0.0, 0.0),
+            'Dump_mouth': (3.0, 2.0, 0.0),
+            'Dump_brow': (5.0, 4.0, 0.0),
+        })
+        self.assertEqual(result, {'FINISHED'})
+        common = (0.0, 2.0, 0.0)  # x は 0 固定、y/z は中央値
+        for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
+            self.assertEqual(tuple(copied[name].location), common)
 
     def test_mixed_none_uses_median_of_valid(self):
         # None の顔が混ざっても有効分の中央値を全顔に適用

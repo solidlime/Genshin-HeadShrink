@@ -668,7 +668,9 @@ def extract_char_config(props):
         'shrink_falloff': float(props.shrink_falloff),
         'shrink_shift': [float(v) for v in props.shrink_shift],
         'face_full_transform': bool(props.face_full_transform),
-        'face_offset': [float(v) for v in props.face_offset],
+        'face_offset_eye': [float(v) for v in props.face_offset_eye],
+        'face_offset_mouth': [float(v) for v in props.face_offset_mouth],
+        'face_offset_brow': [float(v) for v in props.face_offset_brow],
     }
 
 
@@ -837,7 +839,9 @@ def _preview_props_update(self, context):
                 preview_shrink_mesh(obj.data, center, half, scale,
                                     tuple(obj.location), falloff, shift,
                                     False, pivot)
-                _apply_face_offset(obj, tuple(self.face_offset))
+                off = _face_offset_for_role(self, obj.get('hs_role'))
+                if off is not None:
+                    _apply_face_offset(obj, tuple(off))
     _sync_shrink_box(center, half)
 
 
@@ -1148,9 +1152,25 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         default=True,
         update=_preview_props_update,
     )
-    face_offset: bpy.props.FloatVectorProperty(
-        name="Face Offset",
-        description="顔メッシュ (目/口/眉) の頂点に加算する平行移動 (display 空間)。"
+    face_offset_eye: bpy.props.FloatVectorProperty(
+        name="Eye Offset",
+        description="EYES メッシュの頂点に加算する平行移動 (display 空間)。"
+                    "export の display_to_game でゲーム座標に反映される。"
+                    "BODY には適用されない",
+        size=3, default=(0.0, 0.0, 0.0), subtype='TRANSLATION',
+        update=_preview_props_update,
+    )
+    face_offset_mouth: bpy.props.FloatVectorProperty(
+        name="Mouth Offset",
+        description="MOUTH メッシュの頂点に加算する平行移動 (display 空間)。"
+                    "export の display_to_game でゲーム座標に反映される。"
+                    "BODY には適用されない",
+        size=3, default=(0.0, 0.0, 0.0), subtype='TRANSLATION',
+        update=_preview_props_update,
+    )
+    face_offset_brow: bpy.props.FloatVectorProperty(
+        name="Brow Offset",
+        description="BROW メッシュの頂点に加算する平行移動 (display 空間)。"
                     "export の display_to_game でゲーム座標に反映される。"
                     "BODY には適用されない",
         size=3, default=(0.0, 0.0, 0.0), subtype='TRANSLATION',
@@ -1672,6 +1692,20 @@ def _face_shrink_pivot(obj, center):
     return _face_mesh_center(obj)
 
 
+def _face_offset_for_role(props, role):
+    """ロールに応じた face_offset プロパティ値を返す。
+
+    EYES/MOUTH/BROW はそれぞれ専用プロパティ (face_offset_eye/mouth/brow) を
+    返す。それ以外 (OTHER 等) は None (オフセット適用なし)。
+    """
+    mapping = {
+        'EYES': getattr(props, 'face_offset_eye', None),
+        'MOUTH': getattr(props, 'face_offset_mouth', None),
+        'BROW': getattr(props, 'face_offset_brow', None),
+    }
+    return mapping.get(role)
+
+
 def _apply_face_offset(obj, offset):
     """顔メッシュの v.co に face_offset を加算 (display 空間、export に反映)。
 
@@ -1825,8 +1859,10 @@ def _preview_setup_impl(self, context):
             # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
             # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
             # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
-            common_loc = tuple(
-                _median([loc[i] for loc in locs]) for i in range(3))
+            # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
+            common_loc = (0.0,
+                          _median([loc[1] for loc in locs]),
+                          _median([loc[2] for loc in locs]))
             for o in preview_objs:
                 if o is main:
                     continue
@@ -1998,7 +2034,9 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
                         obj.data, center, half, scale, tuple(obj.location),
                         falloff, shift, False, pivot):
                     count += 1
-                    _apply_face_offset(obj, tuple(props.face_offset))
+                    off = _face_offset_for_role(props, obj.get('hs_role'))
+                    if off is not None:
+                        _apply_face_offset(obj, tuple(off))
         self.report({'INFO'}, f"Preview shrink applied to {count} mesh(es) "
                               f"(scale={scale:.3f})")
         return {'FINISHED'}
@@ -2428,7 +2466,9 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")
         box.prop(props, "shrink_shift")
-        box.prop(props, "face_offset")
+        box.prop(props, "face_offset_eye")
+        box.prop(props, "face_offset_mouth")
+        box.prop(props, "face_offset_brow")
         box.label(text="Face Offset: 顔メッシュ (目/口/眉) の頂点を表示空間で平行移動。"
                        "export に反映される (BODY には適用されない)", icon='INFO')
         row = box.row()
