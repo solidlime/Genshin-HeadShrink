@@ -2267,6 +2267,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         meshes = [o for o in coll.objects
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
+        used_names = set()
         for obj in meshes:
             vb0 = obj['hs_vb0_hash']
             mesh = obj.data
@@ -2277,6 +2278,12 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             vert_count = len(mesh.vertices)
             role = obj.get('hs_role', 'OTHER')
             unit = unit_name_for_role(role, vb0)
+            # 同名ユニット (例: MOUTH がプライマリ+セカンダリで2つ) は
+            # 3DMigoto が同名セクションを後勝ち上書きして片方の
+            # TextureOverride が死ぬため、2 個目以降は vb0 サフィックスで一意化する。
+            if unit in used_names:
+                unit = f"{unit}_{vb0[:8]}"
+            used_names.add(unit)
             name = char_name + unit
             # v.co already carries every preview transform (shrink, shift)
             # because preview_shrink_mesh writes back local coords.

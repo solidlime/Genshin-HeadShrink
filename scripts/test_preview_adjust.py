@@ -2478,5 +2478,79 @@ class RepositionFacesTest(unittest.TestCase):
         self.assertIn({'WARNING'}, reports)
 
 
+class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
+    """同名ユニット (MOUTH×2) が ini で別名セクションになることを検証。"""
+
+    def test_duplicate_role_units_get_unique_names(self):
+        tmp = tempfile.mkdtemp()
+
+        class _Attr:
+            def __init__(self, n):
+                self._flat = [0.0] * (n * 3)
+                self.data = types.SimpleNamespace(foreach_get=self._foreach_get)
+
+            def _foreach_get(self, name, dest):
+                dest[:] = self._flat
+
+        class _Mesh:
+            def __init__(self, n):
+                self.vertices = [types.SimpleNamespace(co=(0.0, 0.0, 0.0))] * n
+                self._attr = _Attr(n)
+
+            @property
+            def attributes(self):
+                return self
+
+            def get(self, name):
+                return self._attr if name == 'hs_original_pos' else None
+
+        class _Obj:
+            def __init__(self, name, vb0, n):
+                self.type = 'MESH'
+                self.name = name
+                self.data = _Mesh(n)
+                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'MOUTH'}
+
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+
+            def __getitem__(self, key):
+                return self._props[key]
+
+        mouth1 = _Obj('Mouth1', '6192fe1c', 100)
+        mouth2 = _Obj('Mouth2', 'd265427c', 100)
+        coll = types.SimpleNamespace(objects=[mouth1, mouth2])
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: coll if name == 'HS_Preview' else None)
+        saved = (hs.bpy.path.abspath, hs._clean_export_dir)
+        hs.bpy.path.abspath = lambda p: p
+        hs._clean_export_dir = lambda *a, **k: 0
+        try:
+            context = types.SimpleNamespace(
+                scene=types.SimpleNamespace(headshrink_props=types.SimpleNamespace(
+                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS)),
+                preferences=types.SimpleNamespace(addons={
+                    hs.__name__: types.SimpleNamespace(
+                        preferences=types.SimpleNamespace(output_dir=tmp))}))
+            op = types.SimpleNamespace(report=lambda level, msg: None)
+            result = hs.NHS_OT_ExportDiff.execute(op, context)
+        finally:
+            (hs.bpy.path.abspath, hs._clean_export_dir) = saved
+        self.assertEqual(result, {'FINISHED'})
+        out_dir = os.path.join(tmp, 'Noelle')
+        # Base/Key buf が 2 組生成される (一意化された名前で)
+        for fn in ('NoelleMouthBase.buf', 'NoelleMouthKey.buf',
+                   'NoelleMouth_d265427cBase.buf',
+                   'NoelleMouth_d265427cKey.buf'):
+            self.assertTrue(os.path.exists(os.path.join(out_dir, fn)),
+                            f'missing {fn}')
+        # ini の TextureOverride セクションが別名で 2 つ (同名重複なし)
+        ini = open(os.path.join(out_dir, 'Noelle.ini'),
+                   encoding='utf-8').read()
+        self.assertEqual(ini.count('[TextureOverrideNoelleMouth]'), 1)
+        self.assertEqual(ini.count('[TextureOverrideNoelleMouth_d265427c]'), 1)
+        self.assertEqual(ini.count('[TextureOverride'), 2)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
