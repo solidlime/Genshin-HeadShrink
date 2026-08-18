@@ -168,8 +168,11 @@ def make_props(units=(), dump_pairs=()):
 
 
 def make_ctx(props):
+    prefs = types.SimpleNamespace(dump_dir="", output_dir="")
     return types.SimpleNamespace(
-        scene=types.SimpleNamespace(headshrink_props=props))
+        scene=types.SimpleNamespace(headshrink_props=props),
+        preferences=types.SimpleNamespace(
+            addons={hs.__name__: types.SimpleNamespace(preferences=prefs)}))
 
 
 def run_op(cls, ctx):
@@ -481,8 +484,9 @@ class AnalyzeDumpSyncTest(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         hs.bpy.path.abspath = lambda p: p
         self.props = make_props()
-        self.props.dump_dir = self._tmpdir
         self.ctx = make_ctx(self.props)
+        self.ctx.preferences.addons[hs.__name__].preferences.dump_dir = \
+            self._tmpdir
 
     def tearDown(self):
         hs.scan_dump_dir = self._orig_scan

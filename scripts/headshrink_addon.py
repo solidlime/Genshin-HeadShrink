@@ -870,6 +870,24 @@ def _dump_dir_update(self, context):
     bpy.app.timers.register(_run_auto_setup, first_interval=0.1)
 
 
+def _save_prefs(self, context):
+    """プロパティ変更時に userpref.blend を自動保存 (次回起動時も復元)。
+
+    .blend を保存しない運用 (launch_blender.bat 起動) でも、dump_dir /
+    output_dir の変更が次回起動に引き継がれるようにする。
+    """
+    try:
+        bpy.ops.wm.save_userpref()
+    except Exception:
+        pass  # headless / テスト環境では無視
+
+
+def _dump_dir_changed(self, context):
+    """dump_dir 変更時: 自動セットアップ予約 + userpref 自動保存。"""
+    _dump_dir_update(self, context)
+    _save_prefs(self, context)
+
+
 def _dump_pair_update(self, context):
     """dump_pair 変更時に選択ペアを即プレビュー表示 (update コールバック)。
 
@@ -1008,6 +1026,14 @@ class NHSAddonPreferences(bpy.types.AddonPreferences):
         name="Mod Output Dir",
         default=r"G:\XXMI-Launcher-Portable\Mods\Mods\HeadShrink\assets\Preview",
         subtype='DIR_PATH',
+        update=_save_prefs,
+    )
+    dump_dir: bpy.props.StringProperty(
+        name="Dump Dir",
+        description="3DMigoto frame dump directory (vb0/ib .buf files)",
+        default=r"G:\XXMI-Launcher-Portable\Tools\HeadShrink\assets\Dump\Noelle",
+        subtype='DIR_PATH',
+        update=_dump_dir_changed,
     )
 
 
@@ -1020,13 +1046,6 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
                     "pre-skin position buffers (position_vb) that the game "
                     "re-skins every frame (anim-following vb replacement)",
         default=DEFAULT_POSITION_VS,
-    )
-    dump_dir: bpy.props.StringProperty(
-        name="Dump Dir",
-        description="3DMigoto frame dump directory (vb0/ib .buf files)",
-        default=r"G:\XXMI-Launcher-Portable\Tools\HeadShrink\assets\Dump\Noelle",
-        subtype='DIR_PATH',
-        update=_dump_dir_update,
     )
     dump_pair: bpy.props.EnumProperty(
         name="Dump Pair", items=dump_pair_items, default=0,
@@ -1154,7 +1173,8 @@ class NHS_OT_AnalyzeDump(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.headshrink_props
-        dump_dir = bpy.path.abspath(props.dump_dir)
+        prefs = context.preferences.addons[__name__].preferences
+        dump_dir = bpy.path.abspath(prefs.dump_dir)
         if not os.path.isdir(dump_dir):
             self.report({'ERROR'}, f"Dump dir not found: {dump_dir}")
             return {'CANCELLED'}
@@ -1410,7 +1430,8 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.headshrink_props
-        dump_dir = bpy.path.abspath(props.dump_dir)
+        prefs = context.preferences.addons[__name__].preferences
+        dump_dir = bpy.path.abspath(prefs.dump_dir)
         if not os.path.isdir(dump_dir):
             self.report({'ERROR'}, f"Dump dir not found: {dump_dir}")
             return {'CANCELLED'}
@@ -2195,7 +2216,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                                 for v in mesh.vertices]
                 else:
                     dump_path = find_dump_vb0_path(
-                        props.dump_dir, vb0, _dump_cache.get('pairs'))
+                        prefs.dump_dir, vb0, _dump_cache.get('pairs'))
                     if dump_path is not None:
                         self.report({'WARNING'},
                                     f"{name}: no position_vb for {vb0} "
@@ -2219,7 +2240,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 fallback_names.append(name)
                 self.report({'WARNING'},
                             f"{name}: dump vb0 for {vb0} not found in "
-                            f"{props.dump_dir}; exporting via CopyDispatch")
+                            f"{prefs.dump_dir}; exporting via CopyDispatch")
             # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
             flat = [0.0] * (vert_count * 3)
             attr.data.foreach_get('vector', flat)
@@ -2326,6 +2347,7 @@ class NHS_PT_Panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.headshrink_props
+        prefs = context.preferences.addons[__name__].preferences
 
         layout.label(text="① ディレクトリ → ② 登録 → ③ セットアップ → ④ 調整 → ⑤ 生成",
                      icon='INFO')
@@ -2334,7 +2356,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         layout.separator()
         box = layout.box()
         box.label(text="① ダンプディレクトリ", icon='FILE_FOLDER')
-        box.prop(props, "dump_dir")
+        box.prop(prefs, "dump_dir")
         box.label(text="② で解析、③ でセットアップ。units 登録済みなら"
                        "変更時に自動セットアップ", icon='INFO')
 
