@@ -1798,5 +1798,191 @@ class ExportIndependenceTest(unittest.TestCase):
         self.assertEqual(co_a, [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
 
 
+class SnapSettingsTest(unittest.TestCase):
+    """_apply_snap_settings: ライブスナップ ON/OFF。"""
+
+    def _ts(self):
+        return types.SimpleNamespace(
+            use_snap=False, snap_elements=set(), snap_target='CENTER',
+            use_snap_project=False)
+
+    def _ctx(self, ts):
+        return types.SimpleNamespace(
+            scene=types.SimpleNamespace(tool_settings=ts))
+
+    def test_enable_sets_face_snap(self):
+        ts = self._ts()
+        hs._apply_snap_settings(self._ctx(ts), True)
+        self.assertTrue(ts.use_snap)
+        self.assertEqual(ts.snap_elements, {'FACE'})
+        self.assertEqual(ts.snap_target, 'CLOSEST')
+        self.assertTrue(ts.use_snap_project)
+
+    def test_disable_only_clears_use_snap(self):
+        ts = self._ts()
+        ts.use_snap = True
+        ts.snap_elements = {'FACE'}
+        ts.snap_target = 'CLOSEST'
+        ts.use_snap_project = True
+        hs._apply_snap_settings(self._ctx(ts), False)
+        self.assertFalse(ts.use_snap)
+        # 他設定は触らない (OFF は use_snap のみ戻す)
+        self.assertEqual(ts.snap_elements, {'FACE'})
+        self.assertEqual(ts.snap_target, 'CLOSEST')
+        self.assertTrue(ts.use_snap_project)
+
+
+class LoadBodyDrawVertsTest(unittest.TestCase):
+    """_load_body_draw_verts: BODY draw_vb 頂点の読込。"""
+
+    def _pairs(self, pairs):
+        saved = hs._dump_cache.get('pairs')
+        hs._dump_cache['pairs'] = pairs
+        return saved
+
+    def _restore(self, saved):
+        if saved is None:
+            hs._dump_cache.pop('pairs', None)
+        else:
+            hs._dump_cache['pairs'] = saved
+
+    def _main(self, vb0):
+        return types.SimpleNamespace(
+            get=lambda key, default=None: vb0
+            if key == 'hs_vb0_hash' else default)
+
+    def test_pair_found_returns_verts(self):
+        saved = self._pairs([{'vb0': 'aaaa', 'vb0_path': 'p.vb0',
+                              'ib_path': 'p.ib'}])
+        orig_load = hs.load_dump_mesh
+        hs.load_dump_mesh = lambda v, i, transform=None: ([(1.0, 2.0, 3.0)],
+                                                          [], 0)
+        try:
+            self.assertEqual(hs._load_body_draw_verts(self._main('aaaa')),
+                             [(1.0, 2.0, 3.0)])
+        finally:
+            hs.load_dump_mesh = orig_load
+            self._restore(saved)
+
+    def test_no_pair_returns_none(self):
+        saved = self._pairs([])
+        try:
+            self.assertIsNone(hs._load_body_draw_verts(self._main('aaaa')))
+        finally:
+            self._restore(saved)
+
+    def test_load_failure_returns_none(self):
+        saved = self._pairs([{'vb0': 'aaaa', 'vb0_path': 'p.vb0',
+                              'ib_path': 'p.ib'}])
+        orig_load = hs.load_dump_mesh
+
+        def boom(v, i, transform=None):
+            raise ValueError('bad')
+
+        hs.load_dump_mesh = boom
+        try:
+            self.assertIsNone(hs._load_body_draw_verts(self._main('aaaa')))
+        finally:
+            hs.load_dump_mesh = orig_load
+            self._restore(saved)
+
+
+class RepositionFacesTest(unittest.TestCase):
+    """NHS_OT_RepositionFaces: 選択中の顔メッシュのみ再配置。"""
+
+    class _SnapObj:
+        def __init__(self, name, n, role, selected):
+            self.name = name
+            self.type = 'MESH'
+            self.location = [0.0, 0.0, 0.0]
+            self.data = types.SimpleNamespace(
+                vertices=[types.SimpleNamespace(co=(0.0, 0.0, 0.0))] * n)
+            self._role = role
+            self._selected = selected
+            self._props = {}
+
+        def get(self, key, default=None):
+            if key == 'hs_role':
+                return self._role
+            return self._props.get(key, default)
+
+        def __getitem__(self, key):
+            return self._props[key]
+
+        def __setitem__(self, key, value):
+            self._props[key] = value
+
+        def select_get(self):
+            return self._selected
+
+    def _run(self, objects, body_draw_verts, place):
+        """bpy スタブを張って operator を実行。(result, reports) を返す。"""
+        coll = types.SimpleNamespace(objects=objects)
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: coll if name == 'HS_Preview' else None)
+        hs.bpy.context.mode = 'OBJECT'
+        orig_draw = hs._load_body_draw_verts
+        orig_place = hs._face_draw_to_body_space
+        hs._load_body_draw_verts = lambda main: body_draw_verts
+        hs._face_draw_to_body_space = place
+        reports = []
+        op = types.SimpleNamespace(
+            report=lambda level, msg: reports.append(level))
+        try:
+            result = hs.NHS_OT_RepositionFaces.execute(
+                op, types.SimpleNamespace())
+        finally:
+            hs._load_body_draw_verts = orig_draw
+            hs._face_draw_to_body_space = orig_place
+        return result, reports
+
+    def test_selected_only(self):
+        body = self._SnapObj('Body', 100, 'BODY', False)
+        eyes = self._SnapObj('Eyes', 50, 'EYES', True)
+        mouth = self._SnapObj('Mouth', 40, 'MOUTH', False)
+        result, _ = self._run([body, eyes, mouth], [(0.0, 0.0, 0.0)],
+                              lambda *a, **k: (0.1, 0.2, 0.3))
+        self.assertEqual(result, {'FINISHED'})
+        # 選択中のみ配置 + hs_face_origin 更新
+        self.assertEqual(tuple(eyes.location), (0.1, 0.2, 0.3))
+        self.assertEqual(eyes['hs_face_origin'], (0.1, 0.2, 0.3))
+        # 非選択は不変
+        self.assertEqual(tuple(mouth.location), (0.0, 0.0, 0.0))
+        self.assertNotIn('hs_face_origin', mouth._props)
+        # BODY は対象外
+        self.assertEqual(tuple(body.location), (0.0, 0.0, 0.0))
+        self.assertNotIn('hs_face_origin', body._props)
+
+    def test_all_when_none_selected(self):
+        body = self._SnapObj('Body', 100, 'BODY', False)
+        eyes = self._SnapObj('Eyes', 50, 'EYES', False)
+        mouth = self._SnapObj('Mouth', 40, 'MOUTH', False)
+        result, _ = self._run(
+            [body, eyes, mouth], [(0.0, 0.0, 0.0)],
+            lambda face, *a, **k: (0.1, 0.2, 0.3)
+            if face.name == 'Eyes' else (0.4, 0.5, 0.6))
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(tuple(eyes.location), (0.1, 0.2, 0.3))
+        self.assertEqual(eyes['hs_face_origin'], (0.1, 0.2, 0.3))
+        self.assertEqual(tuple(mouth.location), (0.4, 0.5, 0.6))
+        self.assertEqual(mouth['hs_face_origin'], (0.4, 0.5, 0.6))
+
+    def test_draw_load_failure_cancels(self):
+        body = self._SnapObj('Body', 100, 'BODY', False)
+        eyes = self._SnapObj('Eyes', 50, 'EYES', False)
+        result, reports = self._run([body, eyes], None,
+                                    lambda *a, **k: (0.1, 0.2, 0.3))
+        self.assertEqual(result, {'CANCELLED'})
+        self.assertIn({'ERROR'}, reports)
+        self.assertEqual(tuple(eyes.location), (0.0, 0.0, 0.0))
+
+    def test_no_face_meshes_warns(self):
+        body = self._SnapObj('Body', 100, 'BODY', False)
+        result, reports = self._run([body], [(0.0, 0.0, 0.0)],
+                                    lambda *a, **k: (0.1, 0.2, 0.3))
+        self.assertEqual(result, {'FINISHED'})
+        self.assertIn({'WARNING'}, reports)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

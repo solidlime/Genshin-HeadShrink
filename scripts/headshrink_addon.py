@@ -959,6 +959,27 @@ class HS_UL_DumpPairList(bpy.types.UIList):
             row.label(text=f"{item.vert_count}v")
 
 
+def _apply_snap_settings(context, enabled):
+    """ライブスナップ設定を scene.tool_settings に適用する。
+
+    enabled=True: スナップ ON + FACE / CLOSEST / PROJECT。G キーで顔メッシュを
+    移動中に BODY 表面へ吸着する (ライブスナップ)。False: use_snap を OFF に
+    するだけで、snap_elements 等は変更しない (他機能への影響を避ける)。
+    テストで bpy.context を直接参照しないよう context 引数を使う。
+    """
+    ts = context.scene.tool_settings
+    ts.use_snap = bool(enabled)
+    if enabled:
+        ts.snap_elements = {'FACE'}
+        ts.snap_target = 'CLOSEST'
+        ts.use_snap_project = True
+
+
+def _face_snap_update(self, context):
+    """face_snap_enabled 変更時のライブ更新。"""
+    _apply_snap_settings(context, self.face_snap_enabled)
+
+
 class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.props)
     output_dir: bpy.props.StringProperty(
         name="Output Dir",
@@ -1105,6 +1126,13 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
                     "BODY には適用されない",
         size=3, default=(0.0, 0.0, 0.0), subtype='TRANSLATION',
         update=_preview_props_update,
+    )
+    face_snap_enabled: bpy.props.BoolProperty(
+        name="Face Snap Enabled",
+        description="ON: G キーで顔メッシュを移動中、BODY 表面へスナップ"
+                    "(ライブスナップ: face snap / closest / project)",
+        default=False,
+        update=_face_snap_update,
     )
 
 
@@ -1443,6 +1471,9 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         result = _preview_setup_impl(self, context)
         if result != {'FINISHED'}:
             return result
+        # スナップ ON 設定を再適用 (シーン再構築後もトグル ON 状態を保証)
+        if props.face_snap_enabled:
+            _apply_snap_settings(context, True)
         pv_note = f"; {pv_imports} via position_vb" if pv_imports else ""
         self.report({'INFO'}, f"Auto setup: {removed} object(s) cleared, "
                               f"{imported} mesh(es) imported ({failed} failed), "
@@ -1548,6 +1579,25 @@ def _face_draw_to_body_space(face_mesh, body_draw_verts, body_pos_verts,
         return None  # 境界ペア 0 件 → 配置不能
     loc = np.median(np.concatenate(diffs, axis=0), axis=0)
     return tuple(float(c) for c in loc)
+
+
+def _load_body_draw_verts(main):
+    """BODY の draw_vb 表示頂点をダンプから再読込する。
+
+    position_vb 空間の v.co とは別空間 (draw_vb) のため、顔メッシュの近似
+    配置 (_face_draw_to_body_space) にはダンプの vb0 を game_to_display
+    変換して使う。ペア未解析 / 読込失敗時は None。
+    """
+    pair = next((p for p in _dump_cache['pairs']
+                 if p['vb0'] == str(main.get('hs_vb0_hash', ''))), None)
+    if pair is None:
+        return None
+    try:
+        verts, _, _ = load_dump_mesh(pair['vb0_path'], pair['ib_path'],
+                                     transform=game_to_display)
+    except (OSError, ValueError):
+        return None
+    return verts
 
 
 def _face_bbox_center(meshes):
@@ -1755,15 +1805,7 @@ def _preview_setup_impl(self, context):
         body_draw_verts = None
         body_pos_verts = None
         if use_pv_placement:
-            pair = next((p for p in _dump_cache['pairs']
-                         if p['vb0'] == str(main.get('hs_vb0_hash', ''))), None)
-            if pair is not None:
-                try:
-                    body_draw_verts, _, _ = load_dump_mesh(
-                        pair['vb0_path'], pair['ib_path'],
-                        transform=game_to_display)
-                except (OSError, ValueError):
-                    body_draw_verts = None
+            body_draw_verts = _load_body_draw_verts(main)
             if body_draw_verts:
                 body_pos_verts = [tuple(v.co) for v in main.data.vertices]
             else:
@@ -1944,6 +1986,56 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
                     _apply_face_offset(obj, tuple(props.face_offset))
         self.report({'INFO'}, f"Preview shrink applied to {count} mesh(es) "
                               f"(scale={scale:.3f})")
+        return {'FINISHED'}
+
+
+class NHS_OT_RepositionFaces(bpy.types.Operator):
+    bl_idname = "headshrink.reposition_faces"
+    bl_label = "Reposition Faces"
+    bl_description = "Re-run draw->body space placement on the selected face meshes (all if none selected)"
+
+    def execute(self, context):
+        if bpy.context.mode == 'EDIT_MESH':
+            self.report({'ERROR'},
+                        "Edit モード中は実行できません。Edit モードを終了してから実行してください")
+            return {'CANCELLED'}
+        coll = bpy.data.collections.get(PREVIEW_COLLECTION)
+        if coll is None:
+            self.report({'ERROR'}, f"No {PREVIEW_COLLECTION} collection (Preview Setup first)")
+            return {'CANCELLED'}
+        meshes = [o for o in coll.objects if o.type == 'MESH']
+        if not meshes:
+            self.report({'ERROR'}, f"No meshes in {PREVIEW_COLLECTION}")
+            return {'CANCELLED'}
+        # BODY は _preview_setup_impl と同じ判定 (hs_role 優先、無ければ最大頂点数)
+        body_objs = [o for o in meshes if o.get('hs_role') == 'BODY']
+        main = body_objs[0] if body_objs else max(
+            meshes, key=lambda o: len(o.data.vertices))
+        faces = [o for o in meshes if not is_body_mesh(o, meshes)]
+        if not faces:
+            self.report({'WARNING'}, "No face meshes in preview")
+            return {'FINISHED'}
+        # 選択中の顔メッシュのみ対象 (何も選択されていなければ全部)
+        selected = [o for o in faces if o.select_get()]
+        targets = selected if selected else faces
+        body_draw_verts = _load_body_draw_verts(main)
+        if body_draw_verts is None:
+            self.report({'ERROR'},
+                        "BODY draw_vb をダンプから読込めません (ペア未解析 or 読込失敗)。"
+                        "先に ① 解析 → ③ セットアップを実行してください")
+            return {'CANCELLED'}
+        body_pos_verts = [tuple(v.co) for v in main.data.vertices]
+        count = 0
+        for o in targets:
+            loc = _face_draw_to_body_space(o, body_draw_verts, body_pos_verts)
+            if loc is None:
+                continue
+            o.location = loc
+            # 縮小 pivot の基準も新配置に更新 (以後の _face_shrink_pivot は
+            # この原点基準で box 中央をローカル変換する)
+            o['hs_face_origin'] = tuple(loc)
+            count += 1
+        self.report({'INFO'}, f"Repositioned {count}/{len(targets)} face mesh(es)")
         return {'FINISHED'}
 
 
@@ -2297,6 +2389,12 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.label(text="④ 頭部調整 (プレビュー)", icon='VIEWZOOM')
         box.label(text="Display coords: Z=up, Y=right, X=forward", icon='INFO')
         box.label(text="顔メッシュは本体頭部に自動配置。G キーで微調整可", icon='INFO')
+        box.prop(props, "face_snap_enabled")
+        box.label(text="ON: G キー移動中に顔メッシュが BODY 表面へスナップ",
+                  icon='INFO')
+        box.operator("headshrink.reposition_faces", icon='SNAP_FACE')
+        box.label(text="選択中の顔メッシュのみ再配置 (選択なし = 全部)",
+                  icon='INFO')
         box.operator("headshrink.preview_reset", icon='LOOP_BACK')
         row = box.row()
         row.operator("headshrink.save_face_offsets", icon='FILE_TICK')
@@ -2355,6 +2453,7 @@ classes = (
     NHS_OT_PreviewPair,
     NHS_OT_PreviewSetup,
     NHS_OT_PreviewApply,
+    NHS_OT_RepositionFaces,
     NHS_OT_PreviewReset,
     NHS_OT_SaveFaceOffsets,
     NHS_OT_SaveDefaultConfig,
