@@ -769,9 +769,9 @@ class AllVertsTransformTest(unittest.TestCase):
         self.assertTrue(hs.is_body_mesh(big, [big, _Ob(100)]))  # tie -> body
 
     def test_all_verts_rule_face_full_body_box(self):
-        # 新仕様: 顔メッシュは常に全頂点変形 (all_verts=True)、body は box 内
-        # のみ。all_verts 判定 = not is_body_mesh で face_full_transform の
-        # 値に依存しない (フラグは廃止済み)。
+        # 新仕様: 顔メッシュも box 内のみ縮小 (all_verts=False)。is_body_mesh
+        # は box 判定対象の選択にのみ使い、face_full_transform の値に依存しない
+        # (フラグは廃止済み)。
         class _Data:
             def __init__(self, n):
                 self.vertices = [None] * n
@@ -784,7 +784,7 @@ class AllVertsTransformTest(unittest.TestCase):
         small = _Ob(10)
         meshes = [big, small]
         self.assertFalse(not hs.is_body_mesh(big, meshes))    # body -> box のみ
-        self.assertTrue(not hs.is_body_mesh(small, meshes))   # 顔 -> 全頂点変形
+        self.assertTrue(not hs.is_body_mesh(small, meshes))   # 顔 -> box 内縮小
 
 
 class BoxWireframeTest(unittest.TestCase):
@@ -1583,14 +1583,16 @@ class FaceShrinkPivotTest(unittest.TestCase):
                          (2.0, 3.0, 4.0))
 
     def test_shrink_result_loc_independent(self):
-        # 同じ縮小を loc=origin / loc=別値 で適用 → v.co は同一
+        # 同じ縮小 (表示空間 box 内前提) を loc=origin / loc=別値 で適用
+        # → v.co は同一 (export は v.co のみ使用のため)
         def apply_at(loc, origin):
             mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
             obj = self._obj(loc, origin)
             obj.data = mesh
             pivot = hs._face_shrink_pivot(obj, (2.0, 3.0, 4.0))
-            hs.preview_shrink_mesh(mesh, pivot, (1.0, 1.0, 1.0), 0.5,
-                                   loc, 0.0, (0.0, 0.0, 0.0), True, pivot)
+            # box 中央 (2,3,4)・巨大 half → どの loc でも表示頂点は box 内
+            hs.preview_shrink_mesh(mesh, (2.0, 3.0, 4.0), (10.0, 10.0, 10.0),
+                                   0.5, loc, 0.0, (0.0, 0.0, 0.0), False, pivot)
             return [tuple(v.co) for v in mesh.vertices]
 
         origin = (1.0, 2.0, 3.0)
@@ -1599,6 +1601,20 @@ class FaceShrinkPivotTest(unittest.TestCase):
         self.assertEqual(co_a, co_b)
         # ローカル pivot = center - origin = (1,1,1) へ半分寄る
         self.assertEqual(co_a, [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
+
+    def test_outside_box_verts_unchanged(self):
+        # 表示空間頂点が box 外なら不変 (all_verts=False の box 判定)
+        loc = (9.0, 9.0, 9.0)
+        origin = (1.0, 2.0, 3.0)
+        mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
+        obj = self._obj(loc, origin)
+        obj.data = mesh
+        pivot = hs._face_shrink_pivot(obj, (2.0, 3.0, 4.0))
+        # box (2,3,4)/(1,1,1): 表示頂点 (9,9,9),(11,11,11) は box 外
+        hs.preview_shrink_mesh(mesh, (2.0, 3.0, 4.0), (1.0, 1.0, 1.0), 0.5,
+                               loc, 0.0, (0.0, 0.0, 0.0), False, pivot)
+        self.assertEqual([tuple(v.co) for v in mesh.vertices],
+                         [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
 
 
 class FaceOffsetApplyTest(unittest.TestCase):
@@ -1765,21 +1781,31 @@ class BoxCenterPivotTest(unittest.TestCase):
 
 
 class ExportIndependenceTest(unittest.TestCase):
-    """v2.0.0: プレビュー縮小は obj.location 非依存 (export は v.co のみ使用)。"""
+    """プレビュー縮小は obj.location 非依存 (export は v.co のみ使用)。"""
 
-    def test_face_shrink_loc_independent(self):
-        # 顔メッシュ: 同じ縮小を loc=A / loc=B で適用 → v.co は同一
-        def apply_at(loc):
+    def test_face_shrink_box_driven(self):
+        # 顔メッシュ: box 内のみ縮小。配置位置 (loc=hs_face_origin) では
+        # 表示頂点が box 内 → ローカル pivot (center-origin) へ縮小され、
+        # 動かした先 (loc=(9,9,9)) では表示頂点が box 外 → 不変。
+        # どちらも v.co はローカル空間の値のみで決まる (loc 非依存)。
+        def apply_at(loc, origin):
             mesh = _FakeMesh([(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)], loc=loc)
-            obj = types.SimpleNamespace(data=mesh, location=loc)
-            fc = hs._face_mesh_center(obj)
-            hs.preview_shrink_mesh(mesh, fc, (1.0, 1.0, 1.0), 0.5,
-                                   loc, 0.0, (0.0, 0.0, 0.0), True, fc)
+            obj = types.SimpleNamespace(
+                data=mesh, location=loc,
+                get=lambda key, default=None: origin
+                if key == 'hs_face_origin' else default)
+            pivot = hs._face_shrink_pivot(obj, (2.0, 3.0, 4.0))
+            hs.preview_shrink_mesh(mesh, (2.0, 3.0, 4.0), (1.0, 1.0, 1.0),
+                                   0.5, loc, 0.0, (0.0, 0.0, 0.0), False, pivot)
             return [tuple(v.co) for v in mesh.vertices]
 
-        co_a = apply_at((1.0, 2.0, 3.0))
-        co_b = apply_at((9.0, 9.0, 9.0))
-        self.assertEqual(co_a, co_b)
+        origin = (1.0, 2.0, 3.0)
+        # 配置位置: 表示頂点 (1,2,3),(3,4,5) は box (2,3,4)/(1,1,1) 内 → 縮小
+        self.assertEqual(apply_at(origin, origin),
+                         [(0.5, 0.5, 0.5), (1.5, 1.5, 1.5)])
+        # 動かした先: 表示頂点 (9,9,9),(11,11,11) は box 外 → 不変
+        self.assertEqual(apply_at((9.0, 9.0, 9.0), origin),
+                         [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)])
 
     def test_body_shrink_loc_independent(self):
         # BODY: v.co はローカル空間で書き戻される (export は v.co のみ使用)。

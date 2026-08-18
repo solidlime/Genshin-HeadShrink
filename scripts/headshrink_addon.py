@@ -816,12 +816,13 @@ def _preview_props_update(self, context):
                                 tuple(obj.location), falloff, shift,
                                 False, center)
         else:
-            # 顔メッシュ: 全頂点変形、pivot = box 中央 (hs_face_origin 基準)
+            # 顔メッシュ: box 内縮小、pivot = box 中央 (hs_face_origin 基準)
+            # BODY と同じ box 判定 (center/half) を使い、box 外の頂点は不変
             pivot = _face_shrink_pivot(obj, center)
             if pivot is not None:
-                preview_shrink_mesh(obj.data, pivot, half, scale,
+                preview_shrink_mesh(obj.data, center, half, scale,
                                     tuple(obj.location), falloff, shift,
-                                    True, pivot)
+                                    False, pivot)
                 _apply_face_offset(obj, tuple(self.face_offset))
     _sync_shrink_box(center, half)
 
@@ -1977,11 +1978,11 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
                                        False, center):
                     count += 1
             else:
-                # 顔メッシュ: 全頂点変形、pivot = box 中央 (hs_face_origin 基準)
+                # 顔メッシュ: box 内縮小、pivot = box 中央 (hs_face_origin 基準)
                 pivot = _face_shrink_pivot(obj, center)
                 if pivot is not None and preview_shrink_mesh(
-                        obj.data, pivot, half, scale, tuple(obj.location),
-                        falloff, shift, True, pivot):
+                        obj.data, center, half, scale, tuple(obj.location),
+                        falloff, shift, False, pivot):
                     count += 1
                     _apply_face_offset(obj, tuple(props.face_offset))
         self.report({'INFO'}, f"Preview shrink applied to {count} mesh(es) "
