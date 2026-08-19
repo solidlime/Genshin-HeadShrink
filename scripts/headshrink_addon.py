@@ -44,6 +44,61 @@ DEFAULT_POSITION_VS = "653c63ba4a73ca8b"  # skinning (pointlist) pass VS hash
 # ===== DUMP PIPELINE (bpy-independent) =====
 _DUMP_FRAME_RE = re.compile(r'^(\d+)-vb0=([0-9a-fA-F]+)')
 _DUMP_IB_RE = re.compile(r'^(\d+)-ib=([0-9a-fA-F]+)')
+_PS_T0_FRAME_RE = re.compile(r'^(\d+)-ps-t0=([0-9a-fA-F]+)')
+
+
+def _scan_vb_ps_t0_map(dump_dir):
+    """vb0 -> ps-t0 diffuse hash マップを FrameAnalysis ファイル名から収集。
+
+    規則: 000005-vb0=<hash>-vs=<vs>-ps=<ps>.buf と同フレーム
+    000005-ps-t0=<texHash>-vs=<vs>-ps=<ps>.dds が同一フレーム番号+同一 vs/ps
+    でペアリングされる場合、vb0 の描画時 ps-t0 テクスチャ hash を得られる。
+    deduped フォルダは ps-t0 無しなので無視。vs/ps 無しのファイルはスキップ。
+    """
+    vb_entries: dict = {}
+    ps_entries: dict = {}
+    vs_re = re.compile(r'-vs=([0-9a-f]{8})')
+    ps_re = re.compile(r'-ps=([0-9a-f]{8})')
+    try:
+        walk = list(os.walk(dump_dir))
+    except OSError:
+        return {}
+    for root, _dirs, files in walk:
+        if os.path.basename(root) == 'deduped':
+            continue
+        rel = os.path.relpath(root, dump_dir)
+        prefix = '' if rel == '.' else rel + os.sep
+        for fn in files:
+            low = fn.lower()
+            if low.endswith('.buf') and 'vb0=' in low:
+                m = _DUMP_FRAME_RE.match(fn)
+                if not m:
+                    continue
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                key = prefix + m.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                vb_entries[key] = m.group(2).lower()[:8]
+            elif low.endswith('.dds') and 'ps-t0=' in low:
+                m = _PS_T0_FRAME_RE.match(fn)
+                if not m:
+                    continue
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                key = prefix + m.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                tex = m.group(2).lower()
+                if len(tex) > 8:
+                    tex = tex[:8]
+                ps_entries[key] = tex
+    out: dict = {}
+    for k, vb_h in vb_entries.items():
+        tex = ps_entries.get(k)
+        if tex and vb_h not in out:
+            out[vb_h] = tex
+    return out
 
 
 def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
@@ -136,6 +191,10 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
             'vs': vs_m.group(1) if vs_m else '',
         })
     _dump_cache['position_vb'] = position_vb
+    try:
+        _dump_cache['vb_ps_t0'] = _scan_vb_ps_t0_map(dump_dir)
+    except Exception:
+        _dump_cache['vb_ps_t0'] = {}
     return out
 
 
@@ -491,7 +550,7 @@ def box_center_from_obj(obj):
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
 
-def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
+def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
     VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
@@ -506,6 +565,11 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
     Base/Key ファイルを流用した TextureOverride/CommandList/CustomShader
     ブロックを追加出力する (Dispatch も元と同じ vert_count)。既に units に
     同名 hash の unit がある場合はスキップ (重複 override 防止)。
+
+    vb_ps_t0: {vb_hash: ps_t0_hash} — 共有メッシュ (例: Yanfei MOUTH
+    c9846fd5 / 7a73d3b5 が Amber/Monaら6キャラで共有) を他キャラに波及
+    させないため、TextureOverride に ps-t0 = <texHash> をAND条件として
+    追加する。取得できない hash は素通し (フォールバック)。
     """
     parts = ["[Constants]", "global $active = 0", "", "[Present]", "post $active = 0", ""]
     existing_hashes = {u['vb_hash'] for u in units}
@@ -525,9 +589,12 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
                 "",
             ]
             continue
+        _ps = (vb_ps_t0 or {}).get(str(u['vb_hash']).lower())
+        _ps_lines = [f"ps-t0 = {_ps}"] if _ps else []
         parts += [
             f"[TextureOverride{n}]",
             f"hash = {u['vb_hash']}",
+        ] + _ps_lines + [
             "$active = 1",
             f"run = CommandList{n}",
             "",
@@ -565,9 +632,12 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
         for h in (extra_hashes or {}).get(u.get('role'), []):
             if h in existing_hashes:
                 continue
+            _ps_e = (vb_ps_t0 or {}).get(str(h).lower())
+            _ps_e_lines = [f"ps-t0 = {_ps_e}"] if _ps_e else []
             parts += [
                 f"[TextureOverride{n}_{h}]",
                 f"hash = {h}",
+            ] + _ps_e_lines + [
                 "$active = 1",
                 f"run = CommandList{n}_{h}",
                 "",
@@ -2634,10 +2704,19 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             for h in hashes:
                 if h not in merged:
                     merged.append(h)
+        # ps-t0 diffuse gating: vb0->ps-t0 map (共有口メッシュの他キャラ波及防止)
+        vb_ps_t0 = _dump_cache.get('vb_ps_t0')
+        if not vb_ps_t0:
+            _scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+            if _scan_dir and os.path.isdir(_scan_dir):
+                vb_ps_t0 = _scan_vb_ps_t0_map(_scan_dir)
+                _dump_cache['vb_ps_t0'] = vb_ps_t0
+            else:
+                vb_ps_t0 = {}
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units, mode, extra_hashes))
+            f.write(build_diff_ini(char_name, units, mode, extra_hashes, vb_ps_t0))
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"
