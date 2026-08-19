@@ -550,7 +550,7 @@ def box_center_from_obj(obj):
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
 
-def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None):
+def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None, body_hash=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
     VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
@@ -566,21 +566,37 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     ブロックを追加出力する (Dispatch も元と同じ vert_count)。既に units に
     同名 hash の unit がある場合はスキップ (重複 override 防止)。
 
-    vb_ps_t0: deprecated — 旧 per-draw ps-t0 gating (face_diffuse_hashが
+    vb_ps_t0: deprecated — 旧 per-draw ps-t0 gating (body_hash/face_diffuse_hashが
     与えられれば無視、effieface式 $is ゲートを優先)。
 
-    face_diffuse_hash: effieface式 FaceDiffuse hash。与えられれば先頭に
-    [TextureOverrideFaceDiffuse] hash=<hash> $is=1 を出し、各 face系
-    TextureOverride は if $is / endif でガード ($active 維持)。BODY は
-    VB置換のためゲート対象外。Noneならゲート無しフォールバック。
+    body_hash: effieface式 BodyGate hash (BODY position_vb hash, キャラ固有)。
+    与えられれば先頭に [TextureOverrideBodyGate] hash=<hash> $is=1 を出し、
+    各 face系 TextureOverride は if $is / endif でガード。BODY は VB置換の
+    トリガーなのでガード対象外。Noneなら face_diffuse_hash にフォールバック、
+    どちらも無ければゲート無し。units内にBODYがあれば自動検出も行う。
+
+    face_diffuse_hash: deprecated fallback (共有皮膚テクスチャのため非推奨)。
+    body_hash優先で、body無し時のみ旧 [TextureOverrideFaceDiffuse] として使用。
     """
-    # effieface式: $is を global/post で初期化
+    # effieface式: $is を global/post で初期化 (BodyGate専用)
+    # $active は旧互換のため残す (test 互換)、新規は $is を正とする
     parts = ["[Constants]", "global $active = 0", "global $is = 0", "", "[Present]", "post $active = 0", "post $is = 0", ""]
-    if face_diffuse_hash:
-        fd = str(face_diffuse_hash).lower()[:8]
+    # body優先、無ければ faceDiffuseフォールバック (body_hashは ExportDiffが units内BODYから供給)
+    gate_hash = None
+    gate_name = "BodyGate"
+    if body_hash:
+        gate_hash = str(body_hash).lower()[:8]
+        gate_name = "BodyGate"
+    elif face_diffuse_hash:
+        gate_hash = str(face_diffuse_hash).lower()[:8]
+        gate_name = "FaceDiffuse"
+    elif vb_ps_t0:
+        gate_hash = str(vb_ps_t0).lower()[:8]
+        gate_name = "BodyGate"
+    if gate_hash:
         parts += [
-            f"[TextureOverrideFaceDiffuse]",
-            f"hash = {fd}",
+            f"[TextureOverride{gate_name}]",
+            f"hash = {gate_hash}",
             "$is = 1",
             "",
         ]
@@ -601,8 +617,8 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                 "",
             ]
             continue
-        # effieface式 $is ゲート: BODY は VB置換なので対象外、face系のみ if $is
-        _use_is = bool(face_diffuse_hash and u.get('role') != 'BODY')
+        # effieface式 $is ゲート: BODY は VB置換のトリガーなので対象外、face系のみ if $is
+        _use_is = bool(gate_hash and u.get('role') != 'BODY')
         if _use_is:
             parts += [
                 f"[TextureOverride{n}]",
@@ -2877,14 +2893,18 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             for h in hashes:
                 if h not in merged:
                     merged.append(h)
-        # effieface式 FaceDiffuse ゲート: face系 vb_hash集合から ps-t0 最頻値を検出
-        # Body は VB置換のためゲート対象外
-        face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
-        face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
+        # Bodyハッシュ優先ゲート (キャラ固有, 共有皮膚テクスチャ d4841e1a 等の波及を防ぐ)
+        # units内 BODY の vb_hash (= position_vb hash, 例 Yanfei eb8b62d3) を $is トリガーに使用
+        # 無ければ faceDiffuse にフォールバック、どちらも無ければゲート無し
+        body_hash = next((u['vb_hash'] for u in units if u.get('role') == 'BODY'), None)
+        face_diffuse_hash = None
+        if not body_hash:
+            face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
+            face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash))
+            f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash, body_hash))
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"
