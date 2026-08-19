@@ -1021,7 +1021,20 @@ def _save_prefs(self, context):
 
 
 def _dump_dir_changed(self, context):
-    """dump_dir 変更時: 自動セットアップ予約 + userpref 自動保存。"""
+    """dump_dir 変更時: Character 自動反映 + 自動セットアップ予約 + userpref 自動保存。"""
+    try:
+        new_dir = bpy.path.abspath(self.dump_dir) if getattr(self, "dump_dir", None) else ""
+        if new_dir and os.path.isdir(new_dir):
+            base = os.path.basename(os.path.normpath(new_dir))
+            if base.lower().startswith("frameanalysis"):
+                base = os.path.basename(os.path.dirname(os.path.normpath(new_dir)))
+            if base and context and getattr(context, "scene", None) \
+               and hasattr(context.scene, "headshrink_props"):
+                props = context.scene.headshrink_props
+                if base != props.char_name:
+                    props.char_name = base
+    except Exception:
+        pass
     _dump_dir_update(self, context)
     _save_prefs(self, context)
 
@@ -2282,6 +2295,18 @@ class NHS_OT_SaveFaceOffsets(bpy.types.Operator):
     bl_label = "Save Char Config"
     bl_description = "Save HS_Preview mesh locations + all shrink params for the current character (re-applied on Preview Setup / char switch)"
 
+    def invoke(self, context, event):
+        char_name = context.scene.headshrink_props.char_name.strip() or 'Char'
+        path = face_offsets_path()
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict) and char_name in data:
+            return context.window_manager.invoke_confirm(self, event)
+        return self.execute(context)
+
     def execute(self, context):
         props = context.scene.headshrink_props
         coll = bpy.data.collections.get(PREVIEW_COLLECTION)
@@ -2308,6 +2333,17 @@ class NHS_OT_SaveDefaultConfig(bpy.types.Operator):
     bl_idname = "headshrink.save_default_config"
     bl_label = "Save Default"
     bl_description = "Save current shrink params as the shared default for all characters (applied to characters without their own config)"
+
+    def invoke(self, context, event):
+        path = face_offsets_path()
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict) and DEFAULT_CONFIG_KEY in data:
+            return context.window_manager.invoke_confirm(self, event)
+        return self.execute(context)
 
     def execute(self, context):
         props = context.scene.headshrink_props
@@ -2508,55 +2544,6 @@ class NHS_OT_SetRole(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class NHS_OT_ApplyBoxPosition(bpy.types.Operator):
-    bl_idname = "headshrink.apply_box_position"
-    bl_label = "Apply Box Position"
-    bl_description = "Read the moved HS_ShrinkBox position into Shrink Center"
-
-    def execute(self, context):
-        props = context.scene.headshrink_props
-        obj = bpy.data.objects.get(SHRINK_BOX_NAME)
-        if obj is None or obj.type != 'MESH':
-            self.report({'ERROR'}, f"No {SHRINK_BOX_NAME} (Preview Setup first)")
-            return {'CANCELLED'}
-        center = box_center_from_obj(obj)
-        if center is None:
-            self.report({'ERROR'}, f"{SHRINK_BOX_NAME} has no vertices")
-            return {'CANCELLED'}
-        for i in range(3):
-            props.shrink_center[i] = center[i]  # update fires -> re-shrink + box sync
-        self.report({'INFO'}, f"Shrink Center = "
-                              f"({center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f})")
-        return {'FINISHED'}
-
-
-class NHS_OT_CenterOnHead(bpy.types.Operator):
-    bl_idname = "headshrink.center_on_head"
-    bl_label = "Center = Head"
-    bl_description = "Snap Shrink Center to the main body mesh's head center"
-
-    def execute(self, context):
-        props = context.scene.headshrink_props
-        coll = bpy.data.collections.get(PREVIEW_COLLECTION)
-        if coll is None:
-            self.report({'ERROR'}, f"No {PREVIEW_COLLECTION} (Preview Setup first)")
-            return {'CANCELLED'}
-        meshes = [o for o in coll.objects if o.type == 'MESH']
-        if not meshes:
-            self.report({'ERROR'}, f"No meshes in {PREVIEW_COLLECTION}")
-            return {'CANCELLED'}
-        main = max(meshes, key=lambda o: len(o.data.vertices))
-        center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
-        if center is None:
-            self.report({'ERROR'}, "Could not compute head center")
-            return {'CANCELLED'}
-        for i in range(3):
-            props.shrink_center[i] = center[i]
-        self.report({'INFO'}, f"Shrink Center = head "
-                              f"({center[0]:.4f}, {center[1]:.4f}, {center[2]:.4f})")
-        return {'FINISHED'}
-
-
 class NHS_PT_Panel(bpy.types.Panel):
     bl_label = "HeadShrink"
     bl_idname = "NHS_PT_panel"
@@ -2569,34 +2556,24 @@ class NHS_PT_Panel(bpy.types.Panel):
         props = context.scene.headshrink_props
         prefs = context.preferences.addons[__name__].preferences
 
-        layout.label(text="① ディレクトリ → ② 登録 → ③ セットアップ → ④ 調整 → ⑤ 生成",
-                     icon='INFO')
-
         # ---- Step 1: ダンプディレクトリ ----
-        layout.separator()
         box = layout.box()
         box.label(text="① ダンプディレクトリ", icon='FILE_FOLDER')
         box.prop(prefs, "dump_dir")
-        box.label(text="② で解析、③ でセットアップ。units 登録済みなら"
-                       "変更時に自動セットアップ", icon='INFO')
 
         # ---- Step 2: キャラメッシュ登録 (Units) ----
         box = layout.box()
         box.label(text="② キャラメッシュ登録 (Units)", icon='GROUP')
         box.prop(props, "char_name")
         box.operator("headshrink.analyze_dump", icon='FILE_REFRESH')
-        box.label(text="ダンプを解析して候補ペアを表示", icon='INFO')
         box.template_list("HS_UL_DumpPairList", "dump_pairs", props,
                           "dump_pairs", props, "dump_pairs_index", rows=6)
-        box.label(text="選択 (クリック/上下キー) で自動プレビュー表示。確認しながら登録",
-                  icon='INFO')
         box.operator("headshrink.preview_pair", icon='RESTRICT_VIEW_OFF',
                      text="選択ペアを表示")
         row = box.row()
         row.prop(props, "units_role", text="")
         row.operator("headshrink.units_add_pair", icon='ADD',
                      text="表示中のペアを登録")
-        box.label(text="または VB ハッシュを直接入力:", icon='INFO')
         row = box.row(align=True)
         row.prop(props, "units_vb0", text="VB")
         row.prop(props, "units_role", text="")
@@ -2605,32 +2582,17 @@ class NHS_PT_Panel(bpy.types.Panel):
                           "units_list", props, "units_list_index", rows=3)
         row = box.row()
         row.operator("headshrink.units_remove", icon='X')
-        box.label(text="登録したら ③ セットアップで表示 (保存不要・即時反映)。"
-                       "フィールドのみならボディ 1 つで OK。"
-                       "UI 画面も縮めるなら目/口/眉も登録",
-                  icon='INFO')
 
         # ---- Step 3: セットアップ ----
         box = layout.box()
         box.label(text="③ セットアップ", icon='PLAY')
         box.operator("headshrink.auto_setup", icon='PLAY')
-        box.label(text="既存オブジェクトを全削除し、② で登録したモデルを読込 → "
-                       "プレビュー配置まで実行", icon='INFO')
-        box.label(text="units 未登録の状態で押すと最大ペアのみ読込。"
-                       "ダンプ解析結果からペアを選んで登録してから実行が基本",
-                  icon='INFO')
 
         # ---- Step 4: 頭部調整 (プレビュー) ----
         box = layout.box()
         box.label(text="④ 頭部調整 (プレビュー)", icon='VIEWZOOM')
-        box.label(text="Display coords: Z=up, Y=right, X=forward", icon='INFO')
-        box.label(text="顔メッシュは本体頭部に自動配置。G キーで微調整可", icon='INFO')
         box.prop(props, "face_snap_enabled")
-        box.label(text="ON: G キー移動中に顔メッシュが BODY 表面へスナップ",
-                  icon='INFO')
         box.operator("headshrink.reposition_faces", icon='SNAP_FACE')
-        box.label(text="選択中の顔メッシュのみ再配置 (選択なし = 全部)",
-                  icon='INFO')
         box.operator("headshrink.preview_reset", icon='LOOP_BACK')
         row = box.row()
         row.operator("headshrink.save_face_offsets", icon='FILE_TICK')
@@ -2638,12 +2600,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         row = box.row()
         row.operator("headshrink.save_default_config", icon='FILE_TICK')
         row.operator("headshrink.load_default_config", icon='FILE_REFRESH')
-        box.label(text="顔メッシュ位置はキャラごとに保存・自動適用される",
-                  icon='INFO')
-        box.label(text="Save Default: 現在の値を全キャラ共通の基準として保存。"
-                       "Load Default: 基準値を現在の設定に適用", icon='INFO')
         box.prop(props, "shrink_center")
-        box.label(text="縮小範囲 (Box): BODY 頭部を覆う位置に自動設定", icon='INFO')
         box.prop(props, "shrink_half")
         box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")
@@ -2651,24 +2608,11 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.prop(props, "face_offset_eye")
         box.prop(props, "face_offset_mouth")
         box.prop(props, "face_offset_brow")
-        box.label(text="Face Offset: 顔メッシュ (目/口/眉) の頂点を表示空間で平行移動。"
-                       "export に反映される (BODY には適用されない)", icon='INFO')
-        row = box.row()
-        row.operator("headshrink.center_on_head", icon='TRACKER')
-        row.operator("headshrink.apply_box_position", icon='CHECKMARK')
-        box.label(text="Box はワイヤーフレームで表示。G キーで移動 → "
-                       "Apply Box Position で反映", icon='INFO')
-        box.label(text="縮小中心 (Pivot) は Box 中央に固定。Box を動かせば縮小中心も追従。"
-                       "Box はセットアップ時に BODY 頭部へ自動配置",
-                  icon='INFO')
 
         # ---- Step 5: mod 生成 (出力) ----
         box = layout.box()
         box.label(text="⑤ mod 生成 (出力)", icon='EXPORT')
-        prefs = context.preferences.addons[__name__].preferences
         box.prop(prefs, "output_dir")
-        box.label(text="VB Replace (Bennett): ボディは VB 置換 (アニメ追従・隙間対策)。"
-                       "顔パーツは CopyDispatch", icon='INFO')
         box.operator("headshrink.export_diff", icon='EXPORT')
 
 
@@ -2698,8 +2642,6 @@ classes = (
     NHS_OT_LoadDefaultConfig,
     NHS_OT_ExportDiff,
     NHS_OT_SetRole,
-    NHS_OT_ApplyBoxPosition,
-    NHS_OT_CenterOnHead,
     NHS_PT_Panel,
 )
 
