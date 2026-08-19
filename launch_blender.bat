@@ -58,17 +58,13 @@ if exist "%ADDON_DEST%" (
 )
 mklink "%ADDON_DEST%" "%ADDON_SRC%" >nul 2>&1
 if errorlevel 1 (
-    echo       [WARN] mklink failed (no admin?), falling back to copy
-    copy /Y "%ADDON_SRC%" "%ADDON_DEST%" >nul
-    if errorlevel 1 (
-        echo [ERROR] copy failed
-        pause
-        exit /b 1
-    )
-    echo       Installed (copy): %ADDON_DEST%
-) else (
-    echo       Installed (symlink): %ADDON_DEST% -> %ADDON_SRC%
+    echo [ERROR] mklink failed - run as Administrator or enable Developer Mode
+    echo         Symlink: %ADDON_DEST% -> %ADDON_SRC%
+    echo         Right-click launch_blender.bat ^> Run as administrator
+    pause
+    exit /b 1
 )
+echo       Installed (symlink): %ADDON_DEST% -> %ADDON_SRC%
 
 REM Step 2: enable addon + save userpref (one-time)
 echo [2/3] Enabling addon in Blender user prefs...
