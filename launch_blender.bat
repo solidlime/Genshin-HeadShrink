@@ -42,8 +42,8 @@ echo  Blender: %BLENDER%
 echo  Mode:    %MODE%
 echo ============================================
 
-REM Step 1: copy addon into Blender's user scripts/addons dir
-echo [1/3] Installing addon...
+REM Step 1: link addon into Blender's user scripts/addons dir (symlink, fallback to copy)
+echo [1/3] Installing addon (symlink)...
 if not exist "%ADDON_DEST_DIR%" (
     mkdir "%ADDON_DEST_DIR%"
     if errorlevel 1 (
@@ -52,13 +52,23 @@ if not exist "%ADDON_DEST_DIR%" (
         exit /b 1
     )
 )
-copy /Y "%ADDON_SRC%" "%ADDON_DEST%" >nul
-if errorlevel 1 (
-    echo [ERROR] copy failed
-    pause
-    exit /b 1
+if exist "%ADDON_DEST%" (
+    del "%ADDON_DEST%" >nul 2>&1
+    rmdir "%ADDON_DEST%" >nul 2>&1
 )
-echo       Installed: %ADDON_DEST%
+mklink "%ADDON_DEST%" "%ADDON_SRC%" >nul 2>&1
+if errorlevel 1 (
+    echo       [WARN] mklink failed (no admin?), falling back to copy
+    copy /Y "%ADDON_SRC%" "%ADDON_DEST%" >nul
+    if errorlevel 1 (
+        echo [ERROR] copy failed
+        pause
+        exit /b 1
+    )
+    echo       Installed (copy): %ADDON_DEST%
+) else (
+    echo       Installed (symlink): %ADDON_DEST% -> %ADDON_SRC%
+)
 
 REM Step 2: enable addon + save userpref (one-time)
 echo [2/3] Enabling addon in Blender user prefs...
