@@ -2014,6 +2014,13 @@ class NHS_OT_AutoSetup(bpy.types.Operator):
         # スナップ ON 設定を再適用 (シーン再構築後もトグル ON 状態を保証)
         if props.face_snap_enabled:
             _apply_snap_settings(context, True)
+        # Load Default を最後に適用 (AutoSetup完了時にデフォルト設定を読み込む)
+        try:
+            _def_cfg = load_char_config(face_offsets_path(), DEFAULT_CONFIG_KEY)
+            if _def_cfg:
+                apply_char_config(props, _def_cfg)
+        except Exception:
+            pass
         pv_note = f"; {pv_imports} via position_vb" if pv_imports else ""
         self.report({'INFO'}, f"Auto setup: {removed} object(s) cleared, "
                               f"{imported} mesh(es) imported ({failed} failed), "
