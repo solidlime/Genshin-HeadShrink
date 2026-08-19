@@ -611,14 +611,17 @@ def auto_extra_hashes(char_name, units, dump_dir=None):
     assets/Dump/<Char> (無ければ dump_dir フォールバック) 配下の全
     FrameAnalysis-* を再帰走査し、vb0 .buf (raw の vb0=*.buf と
     deduped/*.buf) のファイルサイズから vert_count (=size/40) を導出。
-    units の各 (role, vert_count) と同じ vert_count を持つが units に無い
-    hash を extra_hashes[role] として返す。vert_count < 10 のノイズ
+    vsハッシュも併せて記録し、同一 (vert_count, vs) グループ内でのみ
+    extraを収集する（vert_countだけ一致の別物まで拾う爆殖を防止）。
+    dedupedの vs="" は raw と vs不一致なら除外。vert_count < 10 のノイズ
     (1頂点バッファ等) はスキップ。ダンプが無い環境では {} (エラーにしない)。
     """
     scan_dir = char_dump_dir(char_name) or dump_dir
     if not scan_dir or not os.path.isdir(scan_dir):
         return {}
-    groups = {}
+    groups = {}  # (vert_count, vs) -> set(hash)
+    hash_to_vs = {}  # hash -> first vs seen (for unit vs lookup)
+    vs_re = re.compile(r'-vs=([0-9a-f]{8})')
     for root, _dirs, files in os.walk(scan_dir):
         for fn in files:
             if not fn.lower().endswith('.buf'):
@@ -635,30 +638,115 @@ def auto_extra_hashes(char_name, units, dump_dir=None):
             vc = os.path.getsize(os.path.join(root, fn)) // DUMP_STRIDE
             if vc < 10:
                 continue
-            groups.setdefault(vc, set()).add(h)
+            vs_m = vs_re.search(fn.lower())
+            vs = vs_m.group(1) if vs_m else ''
+            groups.setdefault((vc, vs), set()).add(h)
+            if h not in hash_to_vs:
+                hash_to_vs[h] = vs
     existing = {u['vb_hash'] for u in units}
     out = {}
     for u in units:
-        extra = sorted(groups.get(u['vert_count'], ()) - existing)
+        vc = u['vert_count']
+        vs = hash_to_vs.get(u['vb_hash'], '')
+        # vs一致グループのみを extra 候補に（dedupedの空vsはrawの非空vsと分離）
+        candidates = groups.get((vc, vs), set())
+        # vs不明(old unit)や deduped由来unitはフォールバックで vc一致全体からも拾う
+        # が、空vsグループは除外して爆殖を防ぐ
+        if not candidates and vs == '':
+            # unit自体がdeduped由来なら vs="" グループを使う
+            candidates = groups.get((vc, ''), set())
+        extra = sorted(candidates - existing)
         if extra:
             out.setdefault(u.get('role', 'OTHER'), []).extend(extra)
     return out
 
 
-FACE_OFFSETS_FILE = 'face_offsets.json'
+CONFIG_FILE = 'config.json'
+FACE_OFFSETS_FILE = CONFIG_FILE  # backward compat alias
+OLD_FACE_OFFSETS_FILE = 'face_offsets.json'
 DEFAULT_CONFIG_KEY = '__default__'  # shared per-char fallback config entry
+GLOBAL_CONFIG_KEY = '__global__'  # dump_dir / output_dir etc. (prefs)
+
+
+def _config_dir():
+    """Directory that holds config.json (script dir; cwd fallback)."""
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        return os.getcwd()
 
 
 def face_offsets_path():
-    """Path to the per-character face-offset store (script dir; cwd fallback).
+    """Path to the config store (config.json, migrated from face_offsets.json)."""
+    d = _config_dir()
+    new_p = os.path.join(d, CONFIG_FILE)
+    old_p = os.path.join(d, OLD_FACE_OFFSETS_FILE)
+    # migrate old -> new once
+    if not os.path.exists(new_p) and os.path.exists(old_p):
+        try:
+            # copy, not move, to keep backward compat
+            import shutil
+            shutil.copy2(old_p, new_p)
+        except OSError:
+            pass
+    # prefer new, fallback to old for reading
+    if os.path.exists(new_p):
+        return new_p
+    if os.path.exists(old_p):
+        return old_p
+    return new_p
 
-    Blender may exec the addon without __file__ defined, so guard it.
-    """
+
+def _load_config_data(path):
+    """Load config.json data dict; {} on missing/corrupt."""
     try:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            FACE_OFFSETS_FILE)
-    except NameError:
-        return os.path.join(os.getcwd(), FACE_OFFSETS_FILE)
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_config_data(path, data):
+    """Atomic-ish save of config.json data dict."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def save_global_dirs(dump_dir=None, output_dir=None):
+    """Persist dump_dir / output_dir to config.json __global__ (any-file config)."""
+    path = os.path.join(_config_dir(), CONFIG_FILE)
+    # ensure we write to new file even if old exists and new was just migrated
+    data = _load_config_data(path)
+    # if new empty but old has global, migrate it
+    if not data:
+        old_p = os.path.join(_config_dir(), OLD_FACE_OFFSETS_FILE)
+        if os.path.exists(old_p):
+            data = _load_config_data(old_p)
+    g = data.get(GLOBAL_CONFIG_KEY)
+    if not isinstance(g, dict):
+        g = {}
+    if dump_dir is not None:
+        g['dump_dir'] = str(dump_dir)
+    if output_dir is not None:
+        g['output_dir'] = str(output_dir)
+    data[GLOBAL_CONFIG_KEY] = g
+    _save_config_data(path, data)
+
+
+def load_global_dirs():
+    """Return (dump_dir, output_dir) from config.json __global__ or (None, None)."""
+    path = face_offsets_path()
+    data = _load_config_data(path)
+    g = data.get(GLOBAL_CONFIG_KEY)
+    if not isinstance(g, dict):
+        return None, None
+    return g.get('dump_dir'), g.get('output_dir')
 
 
 def load_face_offsets(path, char_name):
@@ -991,8 +1079,15 @@ def _dump_dir_update(self, context):
     new_dir = bpy.path.abspath(self.dump_dir)
     if not os.path.isdir(new_dir):
         return
-    if not _has_registered_units(context.scene.headshrink_props.char_name):
-        return  # units 未登録なら自動発火しない (手動ボタンで実行)
+    has_file = _has_registered_units(context.scene.headshrink_props.char_name)
+    has_list = False
+    try:
+        lst = getattr(context.scene.headshrink_props, "units_list", None)
+        has_list = bool(lst is not None and len(lst) > 0)
+    except Exception:
+        pass
+    if not (has_file or has_list):
+        return  # units 未登録(ファイルにもリストにも無し)なら自動発火しない
     if new_dir == _last_auto_setup_dir:
         return
 
@@ -1009,15 +1104,38 @@ def _dump_dir_update(self, context):
 
 
 def _save_prefs(self, context):
-    """プロパティ変更時に userpref.blend を自動保存 (次回起動時も復元)。
+    """プロパティ変更時に userpref.blend と config.json へ自動保存。
 
     .blend を保存しない運用 (launch_blender.bat 起動) でも、dump_dir /
     output_dir の変更が次回起動に引き継がれるようにする。
+    config.json への保存は userpref の補助（なんでもあり設定ファイル化）。
     """
     try:
         bpy.ops.wm.save_userpref()
     except Exception:
         pass  # headless / テスト環境では無視
+    # config.json (__global__) へも保存
+    try:
+        prefs = None
+        # context経由の正規 prefs
+        if context is not None and getattr(context, "preferences", None) is not None:
+            try:
+                prefs = context.preferences.addons[__name__].preferences
+            except Exception:
+                prefs = None
+        # updateコールバックの self が AddonPreferences 自体の場合
+        if prefs is None and hasattr(self, "dump_dir"):
+            prefs = self
+        if prefs is not None:
+            dump_dir = getattr(prefs, "dump_dir", None)
+            output_dir = getattr(prefs, "output_dir", None)
+            # None は無視、空文字は保存しない
+            save_global_dirs(
+                dump_dir=dump_dir if dump_dir else None,
+                output_dir=output_dir if output_dir else None,
+            )
+    except Exception:
+        pass
 
 
 def _dump_dir_changed(self, context):
@@ -2650,6 +2768,23 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.headshrink_props = bpy.props.PointerProperty(type=NHSProps)
+    # config.json __global__ から dump_dir / output_dir を復元（なんでもあり設定ファイル化）
+    try:
+        dump_dir, output_dir = load_global_dirs()
+        if (dump_dir or output_dir) and bpy.context.preferences is not None:
+            try:
+                prefs = bpy.context.preferences.addons[__name__].preferences
+                if dump_dir and hasattr(prefs, "dump_dir"):
+                    # AddonPreferences の初期値と違えば上書き
+                    if prefs.dump_dir != dump_dir:
+                        prefs.dump_dir = dump_dir
+                if output_dir and hasattr(prefs, "output_dir"):
+                    if prefs.output_dir != output_dir:
+                        prefs.output_dir = output_dir
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def unregister():

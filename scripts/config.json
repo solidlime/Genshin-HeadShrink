@@ -81,6 +81,10 @@
       0.532541
     ]
   },
+  "__global__": {
+    "dump_dir": "G:\\XXMI-Launcher-Portable\\Tools\\HeadShrink\\assets\\Dump\\Noelle",
+    "output_dir": "G:\\XXMI-Launcher-Portable\\Mods\\Mods\\HeadShrink"
+  },
   "__default__": {
     "__config__": {
       "shrink_center": [
