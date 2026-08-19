@@ -550,7 +550,7 @@ def box_center_from_obj(obj):
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
 
-def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None):
+def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
     VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
@@ -566,12 +566,24 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     ブロックを追加出力する (Dispatch も元と同じ vert_count)。既に units に
     同名 hash の unit がある場合はスキップ (重複 override 防止)。
 
-    vb_ps_t0: {vb_hash: ps_t0_hash} — 共有メッシュ (例: Yanfei MOUTH
-    c9846fd5 / 7a73d3b5 が Amber/Monaら6キャラで共有) を他キャラに波及
-    させないため、TextureOverride に ps-t0 = <texHash> をAND条件として
-    追加する。取得できない hash は素通し (フォールバック)。
+    vb_ps_t0: deprecated — 旧 per-draw ps-t0 gating (face_diffuse_hashが
+    与えられれば無視、effieface式 $is ゲートを優先)。
+
+    face_diffuse_hash: effieface式 FaceDiffuse hash。与えられれば先頭に
+    [TextureOverrideFaceDiffuse] hash=<hash> $is=1 を出し、各 face系
+    TextureOverride は if $is / endif でガード ($active 維持)。BODY は
+    VB置換のためゲート対象外。Noneならゲート無しフォールバック。
     """
-    parts = ["[Constants]", "global $active = 0", "", "[Present]", "post $active = 0", ""]
+    # effieface式: $is を global/post で初期化
+    parts = ["[Constants]", "global $active = 0", "global $is = 0", "", "[Present]", "post $active = 0", "post $is = 0", ""]
+    if face_diffuse_hash:
+        fd = str(face_diffuse_hash).lower()[:8]
+        parts += [
+            f"[TextureOverrideFaceDiffuse]",
+            f"hash = {fd}",
+            "$is = 1",
+            "",
+        ]
     existing_hashes = {u['vb_hash'] for u in units}
     for u in units:
         n = u['name']
@@ -589,77 +601,141 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                 "",
             ]
             continue
-        _ps = (vb_ps_t0 or {}).get(str(u['vb_hash']).lower())
-        _ps_lines = [f"ps-t0 = {_ps}"] if _ps else []
-        parts += [
-            f"[TextureOverride{n}]",
-            f"hash = {u['vb_hash']}",
-        ] + _ps_lines + [
-            "$active = 1",
-            f"run = CommandList{n}",
-            "",
-            f"[CommandList{n}]",
-            f"Resource{n}Dif = copy this",
-            f"run = CustomShader{n}",
-            f"this = Resource{n}Dif",
-            "",
-            f"[Resource{n}Dif]",
-            "",
-            f"[Resource{n}Base]",
-            "type = RWBuffer",
-            f"stride = {DUMP_STRIDE}",
-            f"filename = {n}Base.buf",
-            "",
-            f"[Resource{n}Key]",
-            "type = RWBuffer",
-            f"stride = {DUMP_STRIDE}",
-            f"filename = {n}Key.buf",
-            "",
-            f"[CustomShader{n}]",
-            f"cs = {char}Head.hlsl",
-            "",
-            f"cs-u1 = copy Resource{n}Dif",
-            f"cs-t0 = copy Resource{n}Base",
-            f"cs-t1 = copy Resource{n}Key",
-            "",
-            f"Dispatch = {u['vert_count']}, 1, 1",
-            f"Resource{n}Dif = copy cs-u1",
-            "post cs-u1 = null",
-            "",
-        ]
+        # effieface式 $is ゲート: BODY は VB置換なので対象外、face系のみ if $is
+        _use_is = bool(face_diffuse_hash and u.get('role') != 'BODY')
+        if _use_is:
+            parts += [
+                f"[TextureOverride{n}]",
+                f"hash = {u['vb_hash']}",
+                "if $is",
+                "$active = 1",
+                f"run = CommandList{n}",
+                "endif",
+                "",
+                f"[CommandList{n}]",
+                f"Resource{n}Dif = copy this",
+                f"run = CustomShader{n}",
+                f"this = Resource{n}Dif",
+                "",
+                f"[Resource{n}Dif]",
+                "",
+                f"[Resource{n}Base]",
+                "type = RWBuffer",
+                f"stride = {DUMP_STRIDE}",
+                f"filename = {n}Base.buf",
+                "",
+                f"[Resource{n}Key]",
+                "type = RWBuffer",
+                f"stride = {DUMP_STRIDE}",
+                f"filename = {n}Key.buf",
+                "",
+                f"[CustomShader{n}]",
+                f"cs = {char}Head.hlsl",
+                "",
+                f"cs-u1 = copy Resource{n}Dif",
+                f"cs-t0 = copy Resource{n}Base",
+                f"cs-t1 = copy Resource{n}Key",
+                "",
+                f"Dispatch = {u['vert_count']}, 1, 1",
+                f"Resource{n}Dif = copy cs-u1",
+                "post cs-u1 = null",
+                "",
+            ]
+        else:
+            parts += [
+                f"[TextureOverride{n}]",
+                f"hash = {u['vb_hash']}",
+                "$active = 1",
+                f"run = CommandList{n}",
+                "",
+                f"[CommandList{n}]",
+                f"Resource{n}Dif = copy this",
+                f"run = CustomShader{n}",
+                f"this = Resource{n}Dif",
+                "",
+                f"[Resource{n}Dif]",
+                "",
+                f"[Resource{n}Base]",
+                "type = RWBuffer",
+                f"stride = {DUMP_STRIDE}",
+                f"filename = {n}Base.buf",
+                "",
+                f"[Resource{n}Key]",
+                "type = RWBuffer",
+                f"stride = {DUMP_STRIDE}",
+                f"filename = {n}Key.buf",
+                "",
+                f"[CustomShader{n}]",
+                f"cs = {char}Head.hlsl",
+                "",
+                f"cs-u1 = copy Resource{n}Dif",
+                f"cs-t0 = copy Resource{n}Base",
+                f"cs-t1 = copy Resource{n}Key",
+                "",
+                f"Dispatch = {u['vert_count']}, 1, 1",
+                f"Resource{n}Dif = copy cs-u1",
+                "post cs-u1 = null",
+                "",
+            ]
         # 追加hash: 元unitの Base/Key を共有 (cs-t0/cs-t1 は元unitの
         # Resource を参照、Dispatch は同一 vert_count)。
         for h in (extra_hashes or {}).get(u.get('role'), []):
             if h in existing_hashes:
                 continue
-            _ps_e = (vb_ps_t0 or {}).get(str(h).lower())
-            _ps_e_lines = [f"ps-t0 = {_ps_e}"] if _ps_e else []
-            parts += [
-                f"[TextureOverride{n}_{h}]",
-                f"hash = {h}",
-            ] + _ps_e_lines + [
-                "$active = 1",
-                f"run = CommandList{n}_{h}",
-                "",
-                f"[CommandList{n}_{h}]",
-                f"Resource{n}_{h}Dif = copy this",
-                f"run = CustomShader{n}_{h}",
-                f"this = Resource{n}_{h}Dif",
-                "",
-                f"[Resource{n}_{h}Dif]",
-                "",
-                f"[CustomShader{n}_{h}]",
-                f"cs = {char}Head.hlsl",
-                "",
-                f"cs-u1 = copy Resource{n}_{h}Dif",
-                f"cs-t0 = copy Resource{n}Base",
-                f"cs-t1 = copy Resource{n}Key",
-                "",
-                f"Dispatch = {u['vert_count']}, 1, 1",
-                f"Resource{n}_{h}Dif = copy cs-u1",
-                "post cs-u1 = null",
-                "",
-            ]
+            if _use_is:
+                parts += [
+                    f"[TextureOverride{n}_{h}]",
+                    f"hash = {h}",
+                    "if $is",
+                    "$active = 1",
+                    f"run = CommandList{n}_{h}",
+                    "endif",
+                    "",
+                    f"[CommandList{n}_{h}]",
+                    f"Resource{n}_{h}Dif = copy this",
+                    f"run = CustomShader{n}_{h}",
+                    f"this = Resource{n}_{h}Dif",
+                    "",
+                    f"[Resource{n}_{h}Dif]",
+                    "",
+                    f"[CustomShader{n}_{h}]",
+                    f"cs = {char}Head.hlsl",
+                    "",
+                    f"cs-u1 = copy Resource{n}_{h}Dif",
+                    f"cs-t0 = copy Resource{n}Base",
+                    f"cs-t1 = copy Resource{n}Key",
+                    "",
+                    f"Dispatch = {u['vert_count']}, 1, 1",
+                    f"Resource{n}_{h}Dif = copy cs-u1",
+                    "post cs-u1 = null",
+                    "",
+                ]
+            else:
+                parts += [
+                    f"[TextureOverride{n}_{h}]",
+                    f"hash = {h}",
+                    "$active = 1",
+                    f"run = CommandList{n}_{h}",
+                    "",
+                    f"[CommandList{n}_{h}]",
+                    f"Resource{n}_{h}Dif = copy this",
+                    f"run = CustomShader{n}_{h}",
+                    f"this = Resource{n}_{h}Dif",
+                    "",
+                    f"[Resource{n}_{h}Dif]",
+                    "",
+                    f"[CustomShader{n}_{h}]",
+                    f"cs = {char}Head.hlsl",
+                    "",
+                    f"cs-u1 = copy Resource{n}_{h}Dif",
+                    f"cs-t0 = copy Resource{n}Base",
+                    f"cs-t1 = copy Resource{n}Key",
+                    "",
+                    f"Dispatch = {u['vert_count']}, 1, 1",
+                    f"Resource{n}_{h}Dif = copy cs-u1",
+                    "post cs-u1 = null",
+                    "",
+                ]
     return "\n".join(parts)
 
 
@@ -729,6 +805,94 @@ def auto_extra_hashes(char_name, units, dump_dir=None):
         if extra:
             out.setdefault(u.get('role', 'OTHER'), []).extend(extra)
     return out
+
+
+def _find_face_diffuse_hash(char_name, vb_hashes):
+    """assets/Dump/<Char> から FaceDiffuse (ps-t0) を自動検出。
+
+    vb_hashes (face系 vb0 hash集合) の描画時に対応する ps-t0 hashを
+    FrameAnalysis ファイル名の同一フレーム+同一 vs/ps ペアリングから収集し、
+    最も出現回数が多い ps-t0 を返す。dedupedは除外。見つからなければ None。
+    char_dump_dir が無ければ assets/Dump 配下を再帰探索して <Char> を探す
+    (★ok サブフォルダ対応)。
+    """
+    if not vb_hashes:
+        return None
+    vb_set = {str(h).lower()[:8] for h in vb_hashes}
+    dump_dir = char_dump_dir(char_name)
+    # ★ok 等のサブフォルダ対応: assets/Dump 配下を再帰探索
+    if not dump_dir:
+        try:
+            base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', 'assets', 'Dump')
+        except NameError:
+            base = os.path.join(os.getcwd(), 'assets', 'Dump')
+        if os.path.isdir(base):
+            for root, dirs, _files in os.walk(base):
+                if os.path.basename(root).lower() == str(char_name).lower():
+                    dump_dir = root
+                    break
+                # 直接の子ディレクトリ名が char_name かもチェック
+                for d in dirs:
+                    if d.lower() == str(char_name).lower():
+                        cand = os.path.join(root, d)
+                        if os.path.isdir(cand):
+                            dump_dir = cand
+                            break
+                if dump_dir:
+                    break
+    if not dump_dir or not os.path.isdir(dump_dir):
+        return None
+    vs_re = re.compile(r'-vs=([0-9a-f]{8})')
+    ps_re = re.compile(r'-ps=([0-9a-f]{8})')
+    vb_occurrences = []  # list of (key, vb_hash)
+    ps_map: dict = {}
+    try:
+        walk = list(os.walk(dump_dir))
+    except OSError:
+        return None
+    for root, _dirs, files in walk:
+        if os.path.basename(root) == 'deduped':
+            continue
+        rel = os.path.relpath(root, dump_dir)
+        prefix = '' if rel == '.' else rel + os.sep
+        for fn in files:
+            low = fn.lower()
+            if low.endswith('.buf') and 'vb0=' in low:
+                m = _DUMP_FRAME_RE.match(fn)
+                if not m:
+                    continue
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                vb_h = m.group(2).lower()[:8]
+                if vb_h not in vb_set:
+                    continue
+                key = prefix + m.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                vb_occurrences.append((key, vb_h))
+            elif low.endswith('.dds') and 'ps-t0=' in low:
+                m = _PS_T0_FRAME_RE.match(fn)
+                if not m:
+                    continue
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                key = prefix + m.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                tex = m.group(2).lower()
+                if len(tex) > 8:
+                    tex = tex[:8]
+                ps_map[key] = tex
+    from collections import Counter
+    cnt = Counter()
+    for k, _vb in vb_occurrences:
+        tex = ps_map.get(k)
+        if tex:
+            cnt[tex] += 1
+    if not cnt:
+        return None
+    return cnt.most_common(1)[0][0]
 
 
 CONFIG_FILE = 'config.json'
@@ -2606,10 +2770,10 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
         used_names = set()
-        # 同一 (role, vert_count) のセカンダリVB (例: MOUTH 2個目) はプライマリと
-        # 同一トポロジなので、プライマリの delta を共有して変形を再現する。
-        # シーン配置 (hs_face_origin / obj.location) が違うと preview 結果が
-        # 個別に変わるため、vert の直接共有ではなく delta 共有で揃える。
+        primary_for_key: dict = {}  # (role, vert_count) -> primary name (extra化判定用)
+        # 同一 (role, vert_count) のセカンダリVB (例: 7a73d3b5 は c9846fd5 と同サイズ) は
+        # 別primaryとしてBase/Keyを作らず extra_hash として再分類 (Noelle d265427cと同様)。
+        # 同一トポロジなので primary の delta を共有して変形を再現する。
         delta_cache = {}
         for obj in meshes:
             vb0 = obj['hs_vb0_hash']
@@ -2620,6 +2784,13 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 return {'CANCELLED'}
             vert_count = len(mesh.vertices)
             role = obj.get('hs_role', 'OTHER')
+            # 7a73d3b5 冗長排除: 同一 (role, vert_count) の2個目以降は extra へ
+            _dup_key = (role, vert_count)
+            if role != 'BODY' and _dup_key in primary_for_key:
+                lst = extra_hashes.setdefault(role, [])
+                if vb0 not in lst and vb0 not in {u['vb_hash'] for u in units}:
+                    lst.append(vb0)
+                continue
             unit = unit_name_for_role(role, vb0)
             # 同名ユニット (例: MOUTH がプライマリ+セカンダリで2つ) は
             # 3DMigoto が同名セクションを後勝ち上書きして片方の
@@ -2663,6 +2834,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                     f.write(pos_data)
                 units.append({'name': name, 'vb_hash': dump_hash,
                               'vert_count': vert_count, 'role': 'BODY'})
+                primary_for_key[('BODY', vert_count)] = name
                 continue
             # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
             flat = [0.0] * (vert_count * 3)
@@ -2690,6 +2862,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 f.write(key_data)
             units.append({'name': name, 'vb_hash': vb0, 'vert_count': vert_count,
                           'role': role})
+            primary_for_key[(role, vert_count)] = name
         if not units:
             self.report({'ERROR'}, "No hs_vb0_hash meshes in HS_Preview")
             return {'CANCELLED'}
@@ -2704,19 +2877,14 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             for h in hashes:
                 if h not in merged:
                     merged.append(h)
-        # ps-t0 diffuse gating: vb0->ps-t0 map (共有口メッシュの他キャラ波及防止)
-        vb_ps_t0 = _dump_cache.get('vb_ps_t0')
-        if not vb_ps_t0:
-            _scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
-            if _scan_dir and os.path.isdir(_scan_dir):
-                vb_ps_t0 = _scan_vb_ps_t0_map(_scan_dir)
-                _dump_cache['vb_ps_t0'] = vb_ps_t0
-            else:
-                vb_ps_t0 = {}
+        # effieface式 FaceDiffuse ゲート: face系 vb_hash集合から ps-t0 最頻値を検出
+        # Body は VB置換のためゲート対象外
+        face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
+        face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units, mode, extra_hashes, vb_ps_t0))
+            f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash))
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"

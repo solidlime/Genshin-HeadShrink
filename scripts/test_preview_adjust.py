@@ -2479,7 +2479,9 @@ class RepositionFacesTest(unittest.TestCase):
 
 
 class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
-    """同名ユニット (MOUTH×2) が ini で別名セクションになることを検証。"""
+    """同名ユニット (MOUTH×2, 同vert_count) は extra_hash として統合されることを検証。
+    7a73d3b5 冗長排除と同様: 2個目は別Base/Keyを作らず primary の Base/Key を共有。
+    """
 
     def test_duplicate_role_units_get_unique_names(self):
         tmp = tempfile.mkdtemp()
@@ -2538,18 +2540,29 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
             (hs.bpy.path.abspath, hs._clean_export_dir) = saved
         self.assertEqual(result, {'FINISHED'})
         out_dir = os.path.join(tmp, 'Noelle')
-        # Base/Key buf が 2 組生成される (一意化された名前で)
-        for fn in ('NoelleMouthBase.buf', 'NoelleMouthKey.buf',
-                   'NoelleMouth_d265427cBase.buf',
-                   'NoelleMouth_d265427cKey.buf'):
+        # 冗長排除: primary の Base/Key のみ生成、2個目の別Base/Keyは作らない (extra共有)
+        for fn in ('NoelleMouthBase.buf', 'NoelleMouthKey.buf'):
             self.assertTrue(os.path.exists(os.path.join(out_dir, fn)),
                             f'missing {fn}')
-        # ini の TextureOverride セクションが別名で 2 つ (同名重複なし)
+        for fn in ('NoelleMouth_d265427cBase.buf',
+                   'NoelleMouth_d265427cKey.buf'):
+            self.assertFalse(os.path.exists(os.path.join(out_dir, fn)),
+                             f'should not exist (extra shares primary) {fn}')
+        # ini の TextureOverride は primary + extra の2つ (extraは同 role の別hashとして出力)
+        # + FaceDiffuseゲートが自動検出された場合は +1
         ini = open(os.path.join(out_dir, 'Noelle.ini'),
                    encoding='utf-8').read()
         self.assertEqual(ini.count('[TextureOverrideNoelleMouth]'), 1)
         self.assertEqual(ini.count('[TextureOverrideNoelleMouth_d265427c]'), 1)
-        self.assertEqual(ini.count('[TextureOverride'), 2)
+        # FaceDiffuse gate があれば 3、無ければ 2
+        tc = ini.count('[TextureOverride')
+        self.assertIn(tc, (2, 3))
+        if tc == 3:
+            self.assertIn('[TextureOverrideFaceDiffuse]', ini)
+            self.assertIn('if $is', ini)
+        # extra は primary の Base/Key を参照 (cs-t0/cs-t1 が primary Resource)
+        self.assertIn('cs-t0 = copy ResourceNoelleMouthBase', ini)
+        self.assertIn('cs-t1 = copy ResourceNoelleMouthKey', ini)
 
 
 if __name__ == '__main__':
