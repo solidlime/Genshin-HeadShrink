@@ -579,8 +579,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     body_hash優先で、body無し時のみ旧 [TextureOverrideFaceDiffuse] として使用。
     """
     # effieface式: $is を global/post で初期化 (BodyGate専用)
-    # $active は旧互換のため残す (test 互換)、新規は $is を正とする
-    parts = ["[Constants]", "global $active = 0", "global $is = 0", "", "[Present]", "post $active = 0", "post $is = 0", ""]
+    parts = ["[Constants]", "global $is = 0", "", "[Present]", "post $is = 0", ""]
     # body優先、無ければ faceDiffuseフォールバック (body_hashは ExportDiffが units内BODYから供給)
     gate_hash = None
     gate_name = "BodyGate"
@@ -608,7 +607,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                 f"[TextureOverride{n}]",
                 f"hash = {u['vb_hash']}",
                 f"vb0 = Resource{n}Position",
-                "$active = 1",
+                "$is = 1",
                 "",
                 f"[Resource{n}Position]",
                 "type = Buffer",
@@ -624,7 +623,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                 f"[TextureOverride{n}]",
                 f"hash = {u['vb_hash']}",
                 "if $is",
-                "$active = 1",
+                "$is = 1",
                 f"run = CommandList{n}",
                 "endif",
                 "",
@@ -661,7 +660,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
             parts += [
                 f"[TextureOverride{n}]",
                 f"hash = {u['vb_hash']}",
-                "$active = 1",
+                "$is = 1",
                 f"run = CommandList{n}",
                 "",
                 f"[CommandList{n}]",
@@ -703,7 +702,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                     f"[TextureOverride{n}_{h}]",
                     f"hash = {h}",
                     "if $is",
-                    "$active = 1",
+                    "$is = 1",
                     f"run = CommandList{n}_{h}",
                     "endif",
                     "",
@@ -730,7 +729,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                 parts += [
                     f"[TextureOverride{n}_{h}]",
                     f"hash = {h}",
-                    "$active = 1",
+                    "$is = 1",
                     f"run = CommandList{n}_{h}",
                     "",
                     f"[CommandList{n}_{h}]",

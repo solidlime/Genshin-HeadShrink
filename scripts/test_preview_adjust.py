@@ -486,9 +486,9 @@ class BuildDiffIniTest(unittest.TestCase):
             {'name': 'NoelleEyes', 'vb_hash': '63f702ce', 'vert_count': 1083},
         ])
         for needle in [
-            '[Constants]', 'global $active = 0',
-            '[Present]', 'post $active = 0',
-            '[TextureOverrideNoelleHead]', 'hash = def7af36', '$active = 1',
+            '[Constants]', 'global $is = 0',
+            '[Present]', 'post $is = 0',
+            '[TextureOverrideNoelleHead]', 'hash = def7af36', '$is = 1',
             'run = CommandListNoelleHead',
             '[CommandListNoelleHead]',
             'ResourceNoelleHeadDif = copy this',
@@ -529,7 +529,7 @@ class BuildDiffIniModeTest(unittest.TestCase):
             '[TextureOverrideNoelleBody]',
             'hash = def7af36',
             'vb0 = ResourceNoelleBodyPosition',
-            '$active = 1',
+            '$is = 1',
             '[ResourceNoelleBodyPosition]',
             'type = Buffer',
             'stride = 40',
