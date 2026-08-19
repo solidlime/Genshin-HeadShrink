@@ -483,8 +483,10 @@ def box_center_from_obj(obj):
 # 1フレームだけ別hashに差し替わるキャラ向けの追加hash (role -> [hash8...])。
 # 追加hashは同一role/vert_countのdeltaを共有する (元unitのBase/Keyを流用)。
 # ハードコード禁止: extra_hashes はキャラconfig (face_offsets.json の
-# __config__.extra_hashes) からのみ供給される。手動で追記する場合は
-# face_offsets.json の該当キャラ __config__ に
+# __config__.extra_hashes) と、Mod Export時の自動検出
+# (auto_extra_hashes: 同キャラの複数FrameAnalysisから同サイズ別hashを
+# 自動で extra_hash として ini に追加) からのみ供給される。手動で追記する
+# 場合は face_offsets.json の該当キャラ __config__ に
 #   "extra_hashes": {"MOUTH": ["d265427c"]}
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
@@ -589,6 +591,58 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
                 "",
             ]
     return "\n".join(parts)
+
+
+def char_dump_dir(char_name):
+    """assets/Dump/<Char> (repo layout: script dir の親) を返す。無ければ None。"""
+    try:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'assets', 'Dump')
+    except NameError:
+        base = os.path.join(os.getcwd(), 'assets', 'Dump')
+    d = os.path.join(base, char_name)
+    return d if os.path.isdir(d) else None
+
+
+def auto_extra_hashes(char_name, units, dump_dir=None):
+    """Mod Export時に同キャラの複数FrameAnalysisから同サイズ別hashを自動で
+    extra_hashとしてiniに追加する。
+
+    assets/Dump/<Char> (無ければ dump_dir フォールバック) 配下の全
+    FrameAnalysis-* を再帰走査し、vb0 .buf (raw の vb0=*.buf と
+    deduped/*.buf) のファイルサイズから vert_count (=size/40) を導出。
+    units の各 (role, vert_count) と同じ vert_count を持つが units に無い
+    hash を extra_hashes[role] として返す。vert_count < 10 のノイズ
+    (1頂点バッファ等) はスキップ。ダンプが無い環境では {} (エラーにしない)。
+    """
+    scan_dir = char_dump_dir(char_name) or dump_dir
+    if not scan_dir or not os.path.isdir(scan_dir):
+        return {}
+    groups = {}
+    for root, _dirs, files in os.walk(scan_dir):
+        for fn in files:
+            if not fn.lower().endswith('.buf'):
+                continue
+            m = _DUMP_FRAME_RE.match(fn)
+            if m:
+                h = m.group(2).lower()[:8]
+            elif os.path.basename(root) == 'deduped':
+                h = os.path.splitext(fn)[0].lower()
+                if not re.fullmatch(r'[0-9a-f]{8}', h):
+                    continue
+            else:
+                continue
+            vc = os.path.getsize(os.path.join(root, fn)) // DUMP_STRIDE
+            if vc < 10:
+                continue
+            groups.setdefault(vc, set()).add(h)
+    existing = {u['vb_hash'] for u in units}
+    out = {}
+    for u in units:
+        extra = sorted(groups.get(u['vert_count'], ()) - existing)
+        if extra:
+            out.setdefault(u.get('role', 'OTHER'), []).extend(extra)
+    return out
 
 
 FACE_OFFSETS_FILE = 'face_offsets.json'
@@ -2308,7 +2362,8 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         char_name = props.char_name.strip() or 'Char'
         # 1フレームだけ別hashに差し替わるキャラ向け追加hash (role -> [hash8...])。
         # ハードコード禁止: キャラconfig (face_offsets.json の __config__) の
-        # extra_hashes のみを参照。無ければ空 (追加ブロックは出さない)。
+        # extra_hashes を基準に、Mod Export時に同キャラの複数FrameAnalysisから
+        # 同サイズ別hashを自動で extra_hash として ini に追加する (下記マージ)。
         cfg = resolve_char_config(face_offsets_path(), char_name)
         extra_hashes = cfg.get('extra_hashes')
         if not isinstance(extra_hashes, dict):
@@ -2414,6 +2469,17 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         if not units:
             self.report({'ERROR'}, "No hs_vb0_hash meshes in HS_Preview")
             return {'CANCELLED'}
+        # Mod Export時に同キャラの複数FrameAnalysisから同サイズ別hashを自動で
+        # extra_hashとしてiniに追加 (assets/Dump/<Char> 走査、無ければ dump_dir
+        # フォールバック)。手動 (face_offsets.json の extra_hashes) が優先:
+        # 自動検出は手動に無い hash のみ追加する (重複はスキップ)。
+        auto = auto_extra_hashes(
+            char_name, units, dump_dir=getattr(prefs, 'dump_dir', ''))
+        for role, hashes in auto.items():
+            merged = extra_hashes.setdefault(role, [])
+            for h in hashes:
+                if h not in merged:
+                    merged.append(h)
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
