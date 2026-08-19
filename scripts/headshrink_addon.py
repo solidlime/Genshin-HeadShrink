@@ -10,7 +10,7 @@ Use: N-panel -> "HeadShrink" tab
 bl_info = {
     "name": "HeadShrink",
     "author": "herta",
-    "version": (2, 0, 0),
+    "version": (2, 0, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > HeadShrink",
     "description": "Dump import + preview shrink + CopyDispatch diff-mod export",
@@ -2268,6 +2268,11 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                   if o.type == 'MESH' and o.get('hs_vb0_hash')]
         units = []
         used_names = set()
+        # 同一 (role, vert_count) のセカンダリVB (例: MOUTH 2個目) はプライマリと
+        # 同一トポロジなので、プライマリの delta を共有して変形を再現する。
+        # シーン配置 (hs_face_origin / obj.location) が違うと preview 結果が
+        # 個別に変わるため、vert の直接共有ではなく delta 共有で揃える。
+        delta_cache = {}
         for obj in meshes:
             vb0 = obj['hs_vb0_hash']
             mesh = obj.data
@@ -2330,7 +2335,17 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             base_verts = [display_to_game(tuple(flat[i:i + 3]))
                           for i in range(0, len(flat), 3)]
             base_data = replace_positions(bytes(vert_count * DUMP_STRIDE), base_verts, DUMP_STRIDE)
-            key_data = replace_positions(base_data, verts, DUMP_STRIDE)
+            key = (role, vert_count)
+            if key not in delta_cache:
+                delta_cache[key] = [(v[0] - b[0], v[1] - b[1], v[2] - b[2])
+                                    for b, v in zip(base_verts, verts)]
+            # セカンダリ (同一 role/vert_count の2個目以降) はプライマリの
+            # delta を base に加算して key を再現する。verts は配置差で
+            # ズレた preview 結果なので使わない。
+            delta = delta_cache[key]
+            key_verts = [(b[0] + d[0], b[1] + d[1], b[2] + d[2])
+                         for b, d in zip(base_verts, delta)]
+            key_data = replace_positions(base_data, key_verts, DUMP_STRIDE)
             with open(os.path.join(output_dir, f"{name}Base.buf"), 'wb') as f:
                 f.write(base_data)
             with open(os.path.join(output_dir, f"{name}Key.buf"), 'wb') as f:
