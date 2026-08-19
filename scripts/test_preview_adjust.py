@@ -2163,14 +2163,14 @@ class AutoSetupCommonLocTest(unittest.TestCase):
         return result, copied
 
     def test_common_median_applied_to_all_faces(self):
-        # 3 顔すべて有効 loc → 各軸中央値が全顔に適用される
+        # 3 顔すべて有効 loc → z のみ中央値が全顔に適用、x,y は 0 固定
         result, copied = self._run({
             'Dump_eyes': (0.0, 0.0, 0.0),
             'Dump_mouth': (0.0, 2.0, 0.0),
             'Dump_brow': (0.0, 4.0, 0.0),
         })
         self.assertEqual(result, {'FINISHED'})
-        common = (0.0, 2.0, 0.0)  # y の中央値
+        common = (0.0, 0.0, 0.0)  # x,y は 0 固定、z は中央値(全て0)
         for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
             self.assertEqual(tuple(copied[name].location), common)
             # 変更3: 顔メッシュは Z 軸 180° 回転
@@ -2181,26 +2181,26 @@ class AutoSetupCommonLocTest(unittest.TestCase):
                          (0.0, 0.0, 0.0))
 
     def test_common_loc_x_forced_to_zero(self):
-        # 共通 loc の x は左右対称のため常に 0.0 に固定 (計算値は無視)
+        # 共通 loc の x,y は常に 0.0 に固定 (計算値は無視)、z のみ中央値
         result, copied = self._run({
             'Dump_eyes': (1.0, 0.0, 0.0),
             'Dump_mouth': (3.0, 2.0, 0.0),
             'Dump_brow': (5.0, 4.0, 0.0),
         })
         self.assertEqual(result, {'FINISHED'})
-        common = (0.0, 2.0, 0.0)  # x は 0 固定、y/z は中央値
+        common = (0.0, 0.0, 0.0)  # x,y は 0 固定、z は中央値(全て0)
         for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
             self.assertEqual(tuple(copied[name].location), common)
 
     def test_mixed_none_uses_median_of_valid(self):
-        # None の顔が混ざっても有効分の中央値を全顔に適用
+        # None の顔が混ざっても有効分の中央値の z を全顔に適用、x,y は 0 固定
         result, copied = self._run({
             'Dump_eyes': (0.0, 0.0, 0.0),
             'Dump_mouth': None,
             'Dump_brow': (0.0, 4.0, 0.0),
         })
         self.assertEqual(result, {'FINISHED'})
-        common = (0.0, 2.0, 0.0)  # 有効 2 つの y 中央値
+        common = (0.0, 0.0, 0.0)  # x,y は 0 固定、z は中央値
         for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
             self.assertEqual(tuple(copied[name].location), common)
 
@@ -2210,9 +2210,9 @@ class AutoSetupCommonLocTest(unittest.TestCase):
             'Dump_eyes': None, 'Dump_mouth': None, 'Dump_brow': None,
         })
         self.assertEqual(result, {'FINISHED'})
-        # head_center=(0,0,0)、顔 center=(1,1,1) → loc=(-1,-1,-1)
+        # head_center=(0,0,0)、顔 center=(1,1,1) → loc=(0,0,-1)  # x,y は 0 固定、z のみ差分
         for name in ('Dump_eyes', 'Dump_mouth', 'Dump_brow'):
-            self.assertEqual(tuple(copied[name].location), (-1.0, -1.0, -1.0))
+            self.assertEqual(tuple(copied[name].location), (0.0, 0.0, -1.0))
 
 
 class BoxCenterPivotTest(unittest.TestCase):

@@ -2393,7 +2393,7 @@ def _preview_setup_impl(self, context):
             # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
             # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
             common_loc = (0.0,
-                          _median([loc[1] for loc in locs]),
+                          0.0,
                           _median([loc[2] for loc in locs]))
             for o in preview_objs:
                 if o is main:
@@ -2411,8 +2411,7 @@ def _preview_setup_impl(self, context):
                         continue
                     face_center = tuple(
                         sum(p[i] for p in verts) / len(verts) for i in range(3))
-                    o.location = tuple(head_center[i] - face_center[i]
-                                       for i in range(3))
+                    o.location = (0.0, 0.0, head_center[2] - face_center[2])
         # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
         # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
         for o in preview_objs:
@@ -2439,7 +2438,7 @@ def _preview_setup_impl(self, context):
                 for o in face_objs:
                     loc = matched.get(o.get('hs_vb0_hash', ''))
                     if loc is not None:
-                        o.location = loc
+                        o.location = (0.0, 0.0, loc[2])
         # Record the final placement (after auto-placement + saved offsets)
         # so Reset Preview can restore G-key moved faces to the setup-time
         # position. Stored per-vertex (POINT domain) like hs_original_pos;
