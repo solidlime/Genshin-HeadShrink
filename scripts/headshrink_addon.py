@@ -480,7 +480,16 @@ def box_center_from_obj(obj):
     return tuple(local[i] + loc[i] for i in range(3))
 
 
-def build_diff_ini(char, units, mode='VB_REPLACE'):
+# 1フレームだけ別hashに差し替わるキャラ向けの追加hash (role -> [hash8...])。
+# 追加hashは同一role/vert_countのdeltaを共有する (元unitのBase/Keyを流用)。
+# ハードコード禁止: extra_hashes はキャラconfig (face_offsets.json の
+# __config__.extra_hashes) からのみ供給される。手動で追記する場合は
+# face_offsets.json の該当キャラ __config__ に
+#   "extra_hashes": {"MOUTH": ["d265427c"]}
+# のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
+
+
+def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
     VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
@@ -489,8 +498,15 @@ def build_diff_ini(char, units, mode='VB_REPLACE'):
     CommandList/CustomShader. Every other unit (face roles, no role) keeps
     the legacy CopyDispatch structure. COPY_DISPATCH mode renders all units
     via CopyDispatch regardless of role.
+
+    extra_hashes: {role: [hash8...]} — 1フレームだけ別hashに差し替わる
+    キャラ向け。追加hashは同一role/vert_countのdeltaを共有するため、元unitの
+    Base/Key ファイルを流用した TextureOverride/CommandList/CustomShader
+    ブロックを追加出力する (Dispatch も元と同じ vert_count)。既に units に
+    同名 hash の unit がある場合はスキップ (重複 override 防止)。
     """
     parts = ["[Constants]", "global $active = 0", "", "[Present]", "post $active = 0", ""]
+    existing_hashes = {u['vb_hash'] for u in units}
     for u in units:
         n = u['name']
         if mode == 'VB_REPLACE' and u.get('role') == 'BODY':
@@ -542,6 +558,36 @@ def build_diff_ini(char, units, mode='VB_REPLACE'):
             "post cs-u1 = null",
             "",
         ]
+        # 追加hash: 元unitの Base/Key を共有 (cs-t0/cs-t1 は元unitの
+        # Resource を参照、Dispatch は同一 vert_count)。
+        for h in (extra_hashes or {}).get(u.get('role'), []):
+            if h in existing_hashes:
+                continue
+            parts += [
+                f"[TextureOverride{n}_{h}]",
+                f"hash = {h}",
+                "$active = 1",
+                f"run = CommandList{n}_{h}",
+                "",
+                f"[CommandList{n}_{h}]",
+                f"Resource{n}_{h}Dif = copy this",
+                f"run = CustomShader{n}_{h}",
+                f"this = Resource{n}_{h}Dif",
+                "",
+                f"[Resource{n}_{h}Dif]",
+                "",
+                f"[CustomShader{n}_{h}]",
+                f"cs = {char}Head.hlsl",
+                "",
+                f"cs-u1 = copy Resource{n}_{h}Dif",
+                f"cs-t0 = copy Resource{n}Base",
+                f"cs-t1 = copy Resource{n}Key",
+                "",
+                f"Dispatch = {u['vert_count']}, 1, 1",
+                f"Resource{n}_{h}Dif = copy cs-u1",
+                "post cs-u1 = null",
+                "",
+            ]
     return "\n".join(parts)
 
 
@@ -620,6 +666,12 @@ def save_char_config(path, char_name, locations, config):
         entry = {}
     for k, v in locations.items():
         entry[k] = [round(float(v[i]), 6) for i in range(3)]
+    # extra_hashes はUIに無い手動データ (face_offsets.json 直編集) なので、
+    # 再保存で消えないよう旧 config から引き継ぐ。
+    old_cfg = entry.get('__config__')
+    if isinstance(old_cfg, dict) and 'extra_hashes' in old_cfg \
+            and 'extra_hashes' not in config:
+        config['extra_hashes'] = old_cfg['extra_hashes']
     entry['__config__'] = config
     data[char_name] = entry
     parent = os.path.dirname(path)
@@ -2254,6 +2306,13 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.headshrink_props
         char_name = props.char_name.strip() or 'Char'
+        # 1フレームだけ別hashに差し替わるキャラ向け追加hash (role -> [hash8...])。
+        # ハードコード禁止: キャラconfig (face_offsets.json の __config__) の
+        # extra_hashes のみを参照。無ければ空 (追加ブロックは出さない)。
+        cfg = resolve_char_config(face_offsets_path(), char_name)
+        extra_hashes = cfg.get('extra_hashes')
+        if not isinstance(extra_hashes, dict):
+            extra_hashes = {}
         # 出力先は AddonPreferences (userpref.blend 保存・再起動後も復元)
         prefs = context.preferences.addons[__name__].preferences
         output_dir = os.path.join(bpy.path.abspath(prefs.output_dir), char_name)
@@ -2350,14 +2409,15 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 f.write(base_data)
             with open(os.path.join(output_dir, f"{name}Key.buf"), 'wb') as f:
                 f.write(key_data)
-            units.append({'name': name, 'vb_hash': vb0, 'vert_count': vert_count})
+            units.append({'name': name, 'vb_hash': vb0, 'vert_count': vert_count,
+                          'role': role})
         if not units:
             self.report({'ERROR'}, "No hs_vb0_hash meshes in HS_Preview")
             return {'CANCELLED'}
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units, mode))
+            f.write(build_diff_ini(char_name, units, mode, extra_hashes))
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"

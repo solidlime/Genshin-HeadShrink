@@ -48,6 +48,11 @@
         "63f702ce": "EYES",
         "6192fe1c": "MOUTH",
         "ddf54429": "BROW"
+      },
+      "extra_hashes": {
+        "MOUTH": [
+          "d265427c"
+        ]
       }
     },
     "Dump_def7af36.001": [
