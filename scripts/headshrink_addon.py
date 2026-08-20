@@ -2538,21 +2538,37 @@ def _body_head_bbox(meshes, head_fraction=0.35):
     BODY is in position_vb space (z 0..1.6, head near the top) since
     v1.9.0; the head region is the top head_fraction of its z range.
     Returns ((cx, cy, cz), (hx, hy, hz)) or None when no BODY mesh.
+    NaN/inf vertices (garbage buffers like 911ff708) are ignored so the
+    box never becomes degenerate or infinite.
     """
     body = next((o for o in meshes if is_body_mesh(o, meshes)), None)
     if body is None:
         return None
     off = tuple(body.location)
-    zs = [v.co[2] + off[2] for v in body.data.vertices]
+    # finite z only (ignore garbage / NaN)
+    zs = [v.co[2] + off[2] for v in body.data.vertices
+          if all(math.isfinite(v.co[i]) for i in range(3))]
     if not zs:
         return None
+    # guard against degenerate / infinite range (garbage)
+    if not all(math.isfinite(c) for c in zs):
+        return None
     z_min, z_max = min(zs), max(zs)
+    if not (math.isfinite(z_min) and math.isfinite(z_max)):
+        return None
+    # degenerate height (all z equal) -> no head region to isolate
+    if abs(z_max - z_min) < 1e-6:
+        return None
     z_thresh = z_min + (1.0 - head_fraction) * (z_max - z_min)
     mins = [float('inf')] * 3
     maxs = [-float('inf')] * 3
     n = 0
     for v in body.data.vertices:
+        if not all(math.isfinite(v.co[i]) for i in range(3)):
+            continue
         c = (v.co[0] + off[0], v.co[1] + off[1], v.co[2] + off[2])
+        if not all(math.isfinite(x) for x in c):
+            continue
         if c[2] < z_thresh:
             continue
         n += 1
@@ -2563,8 +2579,12 @@ def _body_head_bbox(meshes, head_fraction=0.35):
                 maxs[i] = c[i]
     if n == 0:
         return None
+    if not all(math.isfinite(mins[i]) and math.isfinite(maxs[i]) for i in range(3)):
+        return None
     center = tuple((mins[i] + maxs[i]) / 2.0 for i in range(3))
     half = tuple((maxs[i] - mins[i]) / 2.0 for i in range(3))
+    if not all(math.isfinite(x) for x in center + half):
+        return None
     return center, half
 
 
@@ -2575,13 +2595,33 @@ def _auto_face_shrink_center(props, meshes):
     >= 0.15 per axis so the box never collapses). Falls back to the
     face-mesh bbox (center z + 0.1, half untouched) when no BODY mesh
     exists. No candidate -> untouched.
+
+    Generic fallback: if the BODY bbox is degenerate (any half <=1e-6,
+    non-finite, or absurdly large >5.0 — e.g. Lanyan fake Body 220k vs
+    real 28k mismatch or garbage buffers with inf), use the default half
+    0.15 on all axes instead of propagating a collapsed / huge box. This
+    keeps face shrink uniform and avoids the "Z only" artefact where
+    shrink_positions would ignore a zero-thickness axis. No character-name
+    branching.
     """
     head = _body_head_bbox(meshes)
     if head is not None:
         center, half = head
-        props.shrink_center = center
-        props.shrink_half = tuple(max(h, 0.15) for h in half)
-        return
+        # center must be finite
+        if not all(math.isfinite(c) for c in center):
+            head = None
+        elif not all(math.isfinite(h) for h in half):
+            head = None
+        # degenerate / absurd half -> fallback to default 0.15
+        elif any(h <= 1e-6 or h > 5.0 for h in half):
+            # keep center (if finite) but replace half with default
+            props.shrink_center = center
+            props.shrink_half = (0.15, 0.15, 0.15)
+            return
+        else:
+            props.shrink_center = center
+            props.shrink_half = tuple(max(h, 0.15) for h in half)
+            return
     face_c = _face_bbox_center(meshes)
     if face_c is not None:
         props.shrink_center = (props.shrink_center[0], face_c[1], face_c[2] + 0.1)
