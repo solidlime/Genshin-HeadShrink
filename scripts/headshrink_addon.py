@@ -2605,6 +2605,27 @@ def _auto_face_shrink_center(props, meshes):
     branching.
     """
     head = _body_head_bbox(meshes)
+    # Generic fake-Body handling: fake Body (e.g. d3569268 220k stride92) は
+    # 誤stride読込でゴミbboxになるため、正規position_vbの頭部中心で上書きする。
+    # Lanyanハードコード無し、任意のIB分割偽Bodyで有効。
+    if head is not None:
+        try:
+            body_mesh = next((m for m in meshes if is_body_mesh(m, meshes)), None)
+            if body_mesh is not None and bool(body_mesh.get('hs_is_fake_body')):
+                real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
+                if real and real.get('path') and os.path.exists(real['path']):
+                    with open(real['path'], 'rb') as _f:
+                        _d = _f.read()
+                    _n = len(_d) // DUMP_STRIDE
+                    _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
+                    _rc = head_center_from_verts(_verts)
+                    if _rc is not None and all(math.isfinite(c) for c in _rc):
+                        center, half = _rc, (0.15, 0.15, 0.15)
+                        props.shrink_center = center
+                        props.shrink_half = half
+                        return
+        except Exception:
+            pass
     if head is not None:
         center, half = head
         # center must be finite
@@ -2735,8 +2756,25 @@ def _preview_setup_impl(self, context):
                     continue
                 o.location = common_loc
         else:
-            head_center = head_center_from_verts(
-                [tuple(v.co) for v in main.data.vertices])
+            # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
+            # になるため、正規position_vbの頭部中心を優先して使う (generic)。
+            if bool(main.get('hs_is_fake_body')):
+                head_center = None
+                try:
+                    real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
+                    if real and real.get('path') and os.path.exists(real['path']):
+                        with open(real['path'], 'rb') as _f:
+                            _d = _f.read()
+                        _n = len(_d) // DUMP_STRIDE
+                        _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
+                        head_center = head_center_from_verts(_verts)
+                except Exception:
+                    head_center = None
+                if head_center is None:
+                    head_center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
+            else:
+                head_center = head_center_from_verts(
+                    [tuple(v.co) for v in main.data.vertices])
             if head_center is not None:
                 for o in preview_objs:
                     if o is main:
