@@ -2507,6 +2507,44 @@ def _preview_setup_impl(self, context):
     # near the waist. Offset each by (head_center - face_center) on the
     # object location (display coords; user can still tweak with G).
     preview_objs = [o for o in coll.objects if o.type == 'MESH']
+    # Auto-stand IB-split Body (Lanyan 1066a76c Body 41385): game_to_display -> lying;
+    # position_vb bodies are already upright (position_vb_to_display) -> skip.
+    for _o in [x for x in preview_objs if is_body_mesh(x, preview_objs)]:
+        if _o.get('hs_position_vb'):
+            continue
+        _ib = str(_o.get('hs_ib_hash', '')).lower()[:8]
+        _pair = next((p for p in _dump_cache.get('pairs', []) if p.get('vb0') == _o.get('hs_vb0_hash') and p.get('ib', '').lower()[:8] == _ib), None)
+        _is_split = False
+        if _pair is not None:
+            if _pair.get('is_split'):
+                _is_split = True
+            if _pair.get('first_index', 0) not in (0, None, False):
+                _is_split = True
+            if _pair.get('ib_splits') and len(_pair.get('ib_splits', [])) >= 2:
+                _is_split = True
+        if not _is_split:
+            _splits = (_dump_cache.get('ib_splits') or {}).get(_ib, []) or (_dump_cache.get('ib_splits') or {}).get(_ib.lower(), [])
+            if len(_splits) >= 2:
+                _is_split = True
+        if not _is_split:
+            continue
+        try:
+            _verts = [tuple(v.co) for v in _o.data.vertices]
+            if _verts:
+                _mins = [min(v[i] for v in _verts) for i in range(3)]
+                _maxs = [max(v[i] for v in _verts) for i in range(3)]
+                _ext = [_maxs[i] - _mins[i] for i in range(3)]
+                if _ext[2] >= _ext[0] and _ext[2] >= _ext[1]:
+                    continue
+        except Exception:
+            pass
+        try:
+            _cur = tuple(_o.rotation_euler) if hasattr(_o.rotation_euler, '__iter__') else (0.0, 0.0, 0.0)
+            if abs(_cur[0] - (-math.pi/2)) < 0.02 or abs(_cur[0] - (math.pi/2)) < 0.02:
+                continue
+        except Exception:
+            pass
+        _o.rotation_euler = (-math.pi / 2, 0.0, 0.0)
     if preview_objs:
         body_objs = [o for o in preview_objs if o.get('hs_role') == 'BODY']
         main = body_objs[0] if body_objs else max(
