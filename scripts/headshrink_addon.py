@@ -811,7 +811,7 @@ def box_center_from_obj(obj):
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
 
-def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None, body_hash=None):
+def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None, body_hash=None, ib_splits=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
     VB_REPLACE mode (Bennett-mimic): a unit with role='BODY' gets a plain vb0
@@ -1037,11 +1037,27 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                     f"cs-t0 = copy Resource{n}Base",
                     f"cs-t1 = copy Resource{n}Key",
                     "",
-                    f"Dispatch = {u['vert_count']}, 1, 1",
+                     f"Dispatch = {u['vert_count']}, 1, 1",
                     f"Resource{n}_{h}Dif = copy cs-u1",
                     "post cs-u1 = null",
                     "",
-                 ]
+                  ]
+    if ib_splits:
+        done = {str((u.get('ib') or u.get('ib_hash') or '')).lower()[:8] for u in units if u.get('ib_splits')}
+        for ib_hash, splits in ib_splits.items():
+            key = str(ib_hash).lower()[:8]
+            if key in done:
+                continue
+            norm = []
+            for e in splits:
+                if isinstance(e, (list, tuple)):
+                    norm.append((int(e[0]), int(e[1]) if len(e) > 1 else 0))
+                else:
+                    norm.append((int(e), 0))
+            for idx, (first, _c) in enumerate(sorted(norm)):
+                part = ['Head', 'Body', 'Dress'][idx] if idx < 3 else f'Part{idx}'
+                res = f"{char}{part}"
+                parts += [f"[TextureOverride{res}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{res}IB", "", f"[Resource{res}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {res}.ib", ""]
     return "\n".join(parts)
 
 
