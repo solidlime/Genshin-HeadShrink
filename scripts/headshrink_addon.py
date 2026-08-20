@@ -1712,6 +1712,12 @@ class NHS_OT_AnalyzeDump(bpy.types.Operator):
         if not os.path.isdir(dump_dir):
             self.report({'ERROR'}, f"Dump dir not found: {dump_dir}")
             return {'CANCELLED'}
+        # 再読み込み: 前回キャッシュをクリアして毎回フルスキャン
+        global _last_auto_setup_dir, _last_preview_pair
+        _last_auto_setup_dir = None
+        _last_preview_pair = None
+        _dump_cache['pairs'] = []
+        _dump_cache['position_vb'] = {}
         pairs = scan_dump_dir(dump_dir)
         _dump_cache['pairs'] = pairs
         # 選択 UIList 用に同期 (解析前にクリアして全ペアを追加)
