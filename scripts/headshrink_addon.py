@@ -1536,14 +1536,17 @@ def _preview_props_update(self, context):
         return
     center = tuple(self.shrink_center)
     half = tuple(self.shrink_half)
+    # Generic sanitize for Body (Lanyan fake Body x/y collapsed -> Z only)
+    # _sanitize_half maps 0/微小 -> 0.15 so Body shrinks uniformly.
+    half_body = _sanitize_half(half)
     scale = self.shrink_scale
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         if is_body_mesh(obj, meshes):
-            # BODY: box 内縮小、pivot = box 中央 (v2.0.0 固定)
-            preview_shrink_mesh(obj.data, center, half, scale,
+            # BODY: box 内縮小、pivot = box 中央 (v2.0.0 固定) — sanitized half
+            preview_shrink_mesh(obj.data, center, half_body, scale,
                                 tuple(obj.location), falloff, shift,
                                 False, center)
         else:
@@ -1551,13 +1554,13 @@ def _preview_props_update(self, context):
             # BODY と同じ box 判定 (center/half) を使い、box 外の頂点は不変
             pivot = _face_shrink_pivot(obj, center)
             if pivot is not None:
-                preview_shrink_mesh(obj.data, center, half, scale,
+                preview_shrink_mesh(obj.data, center, half_body, scale,
                                     tuple(obj.location), falloff, shift,
                                     False, pivot)
                 off = _face_offset_for_role(self, obj.get('hs_role'))
                 if off is not None:
                     _apply_face_offset(obj, tuple(off))
-    _sync_shrink_box(center, half)
+    _sync_shrink_box(center, half_body)
 
 
 def _dump_dir_update(self, context):
@@ -2532,6 +2535,24 @@ def _apply_face_offset(obj, offset):
                 v.co[2] + offset[2])
 
 
+def _sanitize_half(half, fallback=0.15):
+    """Per-axis sanitize: non-finite / <=1e-6 / >5.0 -> fallback, else clamp to >=fallback.
+
+    Generic fallback for e.g. Lanyan fake Body (x/y collapsed -> Z only) or
+    gargage buffers: any degenerated axis gets fallback so shrink_positions
+    never sees a thin slab. No character-name branching.
+    """
+    out = []
+    for h in half:
+        if not math.isfinite(h) or h <= 1e-6 or h > 5.0:
+            out.append(fallback)
+        elif h < fallback:
+            out.append(fallback)
+        else:
+            out.append(h)
+    return tuple(out)
+
+
 def _body_head_bbox(meshes, head_fraction=0.35):
     """Display-space bbox (center, half) of the BODY mesh's head region.
 
@@ -2540,10 +2561,49 @@ def _body_head_bbox(meshes, head_fraction=0.35):
     Returns ((cx, cy, cz), (hx, hy, hz)) or None when no BODY mesh.
     NaN/inf vertices (garbage buffers like 911ff708) are ignored so the
     box never becomes degenerate or infinite.
+    Generic IB-split fake Body (e.g. Lanyan d3569268 220k) is read via
+    game_to_display while real Body is position_vb_to_display — bbox
+    from the fake would be garbage / collapsed (x/y ~0 -> Z only), so
+    when hs_is_fake_body is set we derive bbox from the real
+    position_vb instead (no hard-coded hash).
     """
     body = next((o for o in meshes if is_body_mesh(o, meshes)), None)
     if body is None:
         return None
+    # Fake Body generic path: derive bbox from real position_vb (correct space)
+    if bool(body.get('hs_is_fake_body')):
+        try:
+            real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
+            if real and real.get('path') and os.path.exists(real['path']):
+                with open(real['path'], 'rb') as _f:
+                    _d = _f.read()
+                _n = len(_d) // DUMP_STRIDE
+                _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
+                _zs = [v[2] for v in _verts if all(math.isfinite(c) for c in v)]
+                if _zs and abs(max(_zs) - min(_zs)) > 1e-6:
+                    _z_min, _z_max = min(_zs), max(_zs)
+                    _z_thresh = _z_min + (1.0 - head_fraction) * (_z_max - _z_min)
+                    _mins = [float('inf')] * 3
+                    _maxs = [-float('inf')] * 3
+                    _n2 = 0
+                    for v in _verts:
+                        if not all(math.isfinite(x) for x in v):
+                            continue
+                        if v[2] < _z_thresh:
+                            continue
+                        _n2 += 1
+                        for i in range(3):
+                            if v[i] < _mins[i]:
+                                _mins[i] = v[i]
+                            if v[i] > _maxs[i]:
+                                _maxs[i] = v[i]
+                    if _n2:
+                        _center = tuple((_mins[i] + _maxs[i]) / 2.0 for i in range(3))
+                        _half = tuple((_maxs[i] - _mins[i]) / 2.0 for i in range(3))
+                        if all(math.isfinite(x) for x in _center + _half):
+                            return _center, _sanitize_half(_half)
+        except Exception:
+            pass
     off = tuple(body.location)
     # finite z only (ignore garbage / NaN)
     zs = [v.co[2] + off[2] for v in body.data.vertices
@@ -2633,15 +2693,15 @@ def _auto_face_shrink_center(props, meshes):
             head = None
         elif not all(math.isfinite(h) for h in half):
             head = None
-        # degenerate / absurd half -> fallback to default 0.15
+        # half is already sanitized by _body_head_bbox / _sanitize_half, but
+        # keep per-axis fallback when raw half slipped through (e.g. direct call)
         elif any(h <= 1e-6 or h > 5.0 for h in half):
-            # keep center (if finite) but replace half with default
             props.shrink_center = center
-            props.shrink_half = (0.15, 0.15, 0.15)
+            props.shrink_half = _sanitize_half(half)
             return
         else:
             props.shrink_center = center
-            props.shrink_half = tuple(max(h, 0.15) for h in half)
+            props.shrink_half = _sanitize_half(half)
             return
     face_c = _face_bbox_center(meshes)
     if face_c is not None:
@@ -2923,6 +2983,7 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
             return {'CANCELLED'}
         center = tuple(props.shrink_center)
         half = tuple(props.shrink_half)
+        half_body = _sanitize_half(half)
         scale = props.shrink_scale
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
@@ -2930,16 +2991,16 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         count = 0
         for obj in meshes:
             if is_body_mesh(obj, meshes):
-                # BODY: box 内縮小、pivot = box 中央 (v2.0.0 固定)
-                if preview_shrink_mesh(obj.data, center, half, scale,
+                # BODY: sanitized half (0/微小 -> 0.15) for uniform shrink
+                if preview_shrink_mesh(obj.data, center, half_body, scale,
                                        tuple(obj.location), falloff, shift,
                                        False, center):
                     count += 1
             else:
-                # 顔メッシュ: box 内縮小、pivot = box 中央 (hs_face_origin 基準)
+                # 顔メッシュ: 同じ sanitized box で判定
                 pivot = _face_shrink_pivot(obj, center)
                 if pivot is not None and preview_shrink_mesh(
-                        obj.data, center, half, scale, tuple(obj.location),
+                        obj.data, center, half_body, scale, tuple(obj.location),
                         falloff, shift, False, pivot):
                     count += 1
                     off = _face_offset_for_role(props, obj.get('hs_role'))
