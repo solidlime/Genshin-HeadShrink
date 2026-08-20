@@ -152,6 +152,62 @@ def _find_ib_path(dump_dir, ib_hash):
     return ''
 
 
+def _has_ib_split(ib_splits):
+    """True when log.txt shows same IB drawn with >=2 first_index values."""
+    return any(len(v) >= 2 for v in (ib_splits or {}).values())
+
+
+def _find_largest_vb0(all_files):
+    """Largest vb0 .buf among all_files by vert_count (fake Body candidate)."""
+    best = None
+    best_vc = -1
+    for root, fn in all_files:
+        low = fn.lower()
+        if not low.endswith('.buf'):
+            continue
+        is_deduped = os.path.basename(root) == 'deduped'
+        m = re.search(r'vb0=([0-9a-f]{8})', low)
+        if m:
+            h = m.group(1).lower()
+        elif is_deduped and re.fullmatch(r'[0-9a-f]{8}', os.path.splitext(fn)[0].lower()):
+            h = os.path.splitext(fn)[0].lower()
+        else:
+            continue
+        p = os.path.join(root, fn)
+        try:
+            vc = os.path.getsize(p) // DUMP_STRIDE
+        except OSError:
+            continue
+        if vc > best_vc:
+            best_vc = vc
+            best = {'vb_hash': h, 'path': p, 'vert_count': vc}
+    return best
+
+
+def _find_real_position_vb(position_vb):
+    """Largest position_vb with 500..100k verts (real Body for IB-split)."""
+    cands = [(h, info) for h, info in (position_vb or {}).items()
+             if 500 < info.get('vert_count', 0) < 100000]
+    if not cands:
+        return None
+    h, info = max(cands, key=lambda x: x[1]['vert_count'])
+    return {'vb_hash': h, 'path': info['path'], 'vert_count': info['vert_count'], 'vs': info.get('vs', '')}
+
+
+def _is_fake_body_pair(pair, dump_cache):
+    """IB-split + vert mismatch => preview is fake Body."""
+    ib_splits = dump_cache.get('ib_splits') or {}
+    if not _has_ib_split(ib_splits):
+        return False
+    pos = dump_cache.get('position_vb') or {}
+    if not pos:
+        return False
+    pos_verts = {info.get('vert_count') for info in pos.values()}
+    if pair.get('vert_count') not in pos_verts and any(500 < v < 100000 for v in pos_verts):
+        return True
+    return False
+
+
 def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     """Scan a 3DMigoto frame dump dir -> list of (vb0, ib) pairs.
 
@@ -248,55 +304,94 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
         ib_splits = {}
     _dump_cache['ib_splits'] = ib_splits
     # Fallback: IB が match_first_index で Head/Body/Dress に分割されるケース
-    # (例: Lan Yan 1066a76c: [0,41385,85527]) は vb0=e9049ebd と ib=1066a76c が
-    # 同フレームでペアにならず out が空に見える。position_vb と log.txt の
-    # ib_splits から Body 合成ペアを生成し、select_import_pairs で正しい Body
-    # が選ばれるようにする。
-    if ib_splits:
-        existing_vb0s = {p['vb0'] for p in out}
-        # position_vb の中でまだペアになっていない候補 (500..100k でゴミ除外)
-        cand_list = [(h, info) for h, info in position_vb.items()
-                     if h not in existing_vb0s
-                     and 500 < info['vert_count'] < 100000]
-        if cand_list:
-            cand_hash, cand_info = max(cand_list, key=lambda x: x[1]['vert_count'])
-            # 最も分割数の多い / 最大総indexの IB を Body 候補として選ぶ
-            best_ib = None
-            best_splits = None
-            best_total = -1
-            for ib_hash, splits in ib_splits.items():
-                if len(splits) < 2:
-                    continue
-                total = sum(c for _, c in splits)
-                if total > best_total:
-                    best_total = total
-                    best_ib = ib_hash
-                    best_splits = splits
-            if best_ib and best_splits:
-                if (cand_hash, best_ib) not in seen:
+    # (例: 1066a76c: [0,41385,85527]) は position_vb と draw vb0 が同フレームで
+    # ペアにならず out が空に見える。プレビューは偽Body (最大 vb0, vert_count
+    # が合わなくても) を is_fake_body で x,y=0 に置くだけ、Export は正規
+    # position_vb (例 28247) で BodyPosition.buf を吐く汎用分岐。ハードコード
+    # hash は使わず log.txt の DrawIndexed パース (ib_splits) で任意の IB 分割
+    # を検出する。
+    if ib_splits and _has_ib_split(ib_splits):
+        # 最も分割数の多い / 最大総indexの IB を Body 候補として選ぶ
+        best_ib = None
+        best_splits = None
+        best_total = -1
+        for ib_hash, splits in ib_splits.items():
+            if len(splits) < 2:
+                continue
+            total = sum(c for _, c in splits)
+            if total > best_total:
+                best_total = total
+                best_ib = ib_hash
+                best_splits = splits
+        if best_ib and best_splits:
+            largest = _find_largest_vb0(all_files)
+            real = _find_real_position_vb(position_vb)
+            # 偽Bodyプレビュー条件: IB分割あり かつ largest と real の vert_count が不一致
+            need_fake = False
+            if largest and real and largest['vert_count'] != real['vert_count']:
+                need_fake = True
+            if need_fake and largest and real:
+                if (largest['vb_hash'], best_ib) not in seen:
                     ib_path = _find_ib_path(dump_dir, best_ib)
                     if not ib_path:
                         for p in out:
                             if p['ib'] == best_ib:
                                 ib_path = p['ib_path']
                                 break
-                    if ib_path:
+                    if ib_path and os.path.exists(largest['path']):
                         body_first, body_cnt = max(best_splits, key=lambda x: x[1])
                         out.append({
-                            'vb0': cand_hash,
+                            'vb0': largest['vb_hash'],
                             'ib': best_ib,
                             'first_index': body_first,
                             'first_count': body_cnt,
                             'ib_splits': best_splits,
                             'is_split': True,
+                            'is_fake_body': True,
+                            'real_vb_hash': real['vb_hash'],
+                            'real_vb_path': real['path'],
+                            'real_vert_count': real['vert_count'],
                             'frame': 'synthetic:' + best_ib[:8],
-                            'vert_count': cand_info['vert_count'],
+                            'vert_count': largest['vert_count'],
                             'index_count': body_cnt,
-                            'vb0_path': cand_info['path'],
+                            'vb0_path': largest['path'],
                             'ib_path': ib_path,
-                            'vs': cand_info.get('vs', '')[:8] if cand_info.get('vs') else '',
+                            'vs': real.get('vs', '')[:8] if real.get('vs') else '',
                         })
-                        seen.add((cand_hash, best_ib))
+                        seen.add((largest['vb_hash'], best_ib))
+                        _dump_cache['real_position_vb'] = real
+            else:
+                # フォールバック: 従来の正規 Body 合成 (偽が不要なキャラや largest 未検出時)
+                existing_vb0s = {p['vb0'] for p in out}
+                cand_list = [(h, info) for h, info in position_vb.items()
+                             if h not in existing_vb0s
+                             and 500 < info['vert_count'] < 100000]
+                if cand_list:
+                    cand_hash, cand_info = max(cand_list, key=lambda x: x[1]['vert_count'])
+                    if (cand_hash, best_ib) not in seen:
+                        ib_path = _find_ib_path(dump_dir, best_ib)
+                        if not ib_path:
+                            for p in out:
+                                if p['ib'] == best_ib:
+                                    ib_path = p['ib_path']
+                                    break
+                        if ib_path:
+                            body_first, body_cnt = max(best_splits, key=lambda x: x[1])
+                            out.append({
+                                'vb0': cand_hash,
+                                'ib': best_ib,
+                                'first_index': body_first,
+                                'first_count': body_cnt,
+                                'ib_splits': best_splits,
+                                'is_split': True,
+                                'frame': 'synthetic:' + best_ib[:8],
+                                'vert_count': cand_info['vert_count'],
+                                'index_count': body_cnt,
+                                'vb0_path': cand_info['path'],
+                                'ib_path': ib_path,
+                                'vs': cand_info.get('vs', '')[:8] if cand_info.get('vs') else '',
+                            })
+                            seen.add((cand_hash, best_ib))
     try:
         _dump_cache['vb_ps_t0'] = _scan_vb_ps_t0_map(dump_dir)
     except Exception:
@@ -1326,6 +1421,11 @@ def select_import_pairs(pairs, units_map=None):
     baseline: a face part cannot be the body, so the body must not be
     dropped merely because it is 5x bigger than a face mesh.
 
+    IB-split generic: Body が IB分割 (log.txt に同IBで複数 first_index)の
+    場合、偽Body (最大 vb0、vert_count が position_vb と不一致でも) は
+    is_fake_body 付きでプレビューに使い、Export は正規 position_vb で行う。
+    偽Body はゴミ判定から除外し、units_map に偽 hash が登録されても許容する。
+
     When units_map is non-empty (per-character {vb0_hash: role} config),
     it is the authoritative character-mesh whitelist: only pairs whose vb0
     is registered are returned, which also drops NPC/effect dumps that the
@@ -1334,13 +1434,19 @@ def select_import_pairs(pairs, units_map=None):
     Noelle 911ff708) that are not in units, and they must be excluded.
     """
     if units_map:
+        # ユニット登録された偽Bodyも許容: そのままプレビューに使い Export は正規に倒す
         return [p for p in pairs if p['vb0'] in units_map]
     if not pairs:
         return []
+    # 偽Body はゴミ判定から除外 (IB分割で最大 vb0 が 200k でも Body として保持)
+    fake_hashes = {p['vb0'] for p in pairs if p.get('is_fake_body')}
     by_vert = sorted(pairs, key=lambda p: p['vert_count'], reverse=True)
     i = 0
     while i < len(by_vert) - 1:
         first, second = by_vert[i], by_vert[i + 1]
+        if first.get('is_fake_body') or first['vb0'] in fake_hashes:
+            i += 1
+            continue
         if 50 <= second['vert_count'] <= 3000:
             i += 1  # 顔サイズはボディ判定の比較基準にしない
             continue
@@ -1350,7 +1456,9 @@ def select_import_pairs(pairs, units_map=None):
             i = max(0, i - 1)
         else:
             i += 1
-    largest = by_vert[0]
+    # largest は偽Bodyがあればそれを優先
+    fake_largest = next((p for p in by_vert if p.get('is_fake_body')), None)
+    largest = fake_largest if fake_largest is not None else by_vert[0]
     out = []
     for p in pairs:
         if p is largest:
@@ -2007,10 +2115,25 @@ def _import_pair(context, pair, units_map=None):
     # BODY + position_vb 対応: スキニング前 position バッファから読込 (頂点数
     # 同一なので IB は draw 側を流用)。position_vb は毎フレーム再スキニング
     # されるため、プレビューは直立ポーズではなくポーズ反映済み形状になる。
+    # IB分割汎用: is_fake_body または IB分割+vert不一致なら偽Bodyを x,y=0 で
+    # プレビューし、Export は正規 position_vb で行う (偽 vb0 は export に使わない)。
+    is_fake = bool(pair.get('is_fake_body')) or (
+        role == 'BODY' and _is_fake_body_pair(pair, _dump_cache))
+    # units_map に偽Body hash が BODY 登録されても許容 (そのままプレビュー、Exportは正規)
+    if role == 'BODY' and not is_fake and pair['vb0'] in (units_map or {}):
+        if _has_ib_split(_dump_cache.get('ib_splits') or {}) and _is_fake_body_pair(pair, _dump_cache):
+            is_fake = True
     vb0_path = pair['vb0_path']
     transform = game_to_display
     position_vb = None
-    if role == 'BODY':
+    real_for_fake = None
+    if role == 'BODY' and is_fake:
+        # プレビューは偽Body (最大 vb0) をそのまま x,y=0 で表示
+        real_for_fake = _find_real_position_vb(_dump_cache.get('position_vb') or {})
+        if real_for_fake is None:
+            real_for_fake = _dump_cache.get('real_position_vb')
+        # transform は game_to_display のまま (偽は position_vb ではない)
+    elif role == 'BODY':
         position_vb = find_position_vb(_dump_cache, pair['vb0'],
                                        pair['vert_count'])
         if position_vb is not None:
@@ -2042,6 +2165,14 @@ def _import_pair(context, pair, units_map=None):
     obj["hs_role"] = role
     if position_vb is not None:
         obj["hs_position_vb"] = position_vb['vb_hash']
+    if is_fake:
+        obj["hs_is_fake_body"] = True
+        # Export は正規 position_vb を使うため real hash を保持
+        rh = pair.get('real_vb_hash') or (real_for_fake or {}).get('vb_hash')
+        if rh:
+            obj["hs_real_position_vb"] = rh
+        # プレビューは x,y=0 に置くだけ (偽Bodyは原点で表示、後段の auto-place で動かさない)
+        obj.location = (0.0, 0.0, 0.0)
     return obj, role, len(verts), len(faces), max_index
 
 
@@ -2501,7 +2632,21 @@ def _preview_setup_impl(self, context):
         obj.scale = s.scale
         obj["hs_vb0_hash"] = s["hs_vb0_hash"]
         obj["hs_role"] = s.get('hs_role', 'OTHER')
+        # 偽Bodyフラグはプレビューまで引き継ぐ (Exportで正規 position_vb に倒すため)
+        if s.get('hs_is_fake_body'):
+            obj["hs_is_fake_body"] = True
+            if s.get('hs_real_position_vb'):
+                obj["hs_real_position_vb"] = s["hs_real_position_vb"]
+        if s.get('hs_position_vb'):
+            obj["hs_position_vb"] = s["hs_position_vb"]
+        if s.get('hs_ib_hash'):
+            obj["hs_ib_hash"] = s["hs_ib_hash"]
+        if s.get('hs_vert_count'):
+            obj["hs_vert_count"] = s["hs_vert_count"]
         coll.objects.link(obj)
+    # 偽Bodyは x,y=0 に置くだけ (汎用 IB分割対応)
+    for o in [x for x in coll.objects if x.get('hs_is_fake_body')]:
+        o.location = (0.0, 0.0, 0.0)
     # Auto-place shared face units onto the body's head: the face VBs are
     # character-shared and dumped in their own local space, so they appear
     # near the waist. Offset each by (head_center - face_center) on the
@@ -2516,7 +2661,8 @@ def _preview_setup_impl(self, context):
         # 近似配置する。BODY の draw_vb 頂点はダンプから再読込する
         # (position_vb 空間の v.co とは別空間のため)。ペアが見つからない /
         # 読込失敗時は従来の head_center 配置にフォールバック。
-        use_pv_placement = bool(main.get('hs_position_vb'))
+        # 偽Bodyは position_vb を持たず x,y=0 のままなので PV配置はスキップ
+        use_pv_placement = bool(main.get('hs_position_vb')) and not bool(main.get('hs_is_fake_body'))
         body_draw_verts = None
         body_pos_verts = None
         if use_pv_placement:
@@ -2970,25 +3116,59 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             # because preview_shrink_mesh writes back local coords.
             verts = [display_to_game(tuple(v.co)) for v in mesh.vertices]
             if mode == 'VB_REPLACE' and role == 'BODY':
-                # Prefer the pre-skin position buffer (same vertex count):
-                # overriding it makes the game VS re-skin every frame, so the
-                # body follows animations exactly. No fallback: the draw vb0
-                # (static pose) or CopyDispatch would break in-game, so abort.
-                position_vb = find_position_vb(
-                    _dump_cache, vb0, vert_count)
-                if position_vb is None:
-                    self.report({'ERROR'}, f"{name}: pre-skin position_vb for "
-                                           f"{vb0} not found (skinning "
-                                           f"vs={props.position_vs}). The dump "
-                                           f"lacks the skinning pass vb0; "
-                                           f"re-dump and re-run Analyze Dump.")
-                    return {'CANCELLED'}
-                dump_hash = position_vb['vb_hash']
-                dump_path = position_vb['path']
-                # position_vb is y-up model-local, not game space: write
-                # back in that frame so the game VS re-skins correctly.
-                pv_verts = [display_to_position_vb(tuple(v.co))
-                            for v in mesh.vertices]
+                # IB分割汎用: 偽Bodyプレビューなら position_vb の正規カウントで
+                # BodyPosition.buf を生成 (偽の vb0 は export に使わない)
+                is_fake = bool(obj.get('hs_is_fake_body'))
+                if not is_fake and _has_ib_split(_dump_cache.get('ib_splits') or {}):
+                    # units_map に偽Bodyが登録された場合も generic に検出
+                    if _is_fake_body_pair({'vb0': vb0, 'vert_count': vert_count}, _dump_cache):
+                        is_fake = True
+                position_vb = None
+                dump_hash = None
+                dump_path = None
+                pv_verts = None
+                if is_fake:
+                    # 正規の position_vb (例 28247) を使う
+                    real = None
+                    rh = obj.get('hs_real_position_vb')
+                    if rh:
+                        real = (_dump_cache.get('position_vb') or {}).get(rh)
+                        if real:
+                            real = {'vb_hash': rh, 'path': real['path'], 'vert_count': real['vert_count']}
+                    if real is None:
+                        real = _find_real_position_vb(_dump_cache.get('position_vb') or {})
+                    if real is None:
+                        real = _dump_cache.get('real_position_vb')
+                    if real is None:
+                        self.report({'ERROR'}, f"{name}: IB-split fake Body but real position_vb not found. Re-dump and re-run Analyze Dump.")
+                        return {'CANCELLED'}
+                    position_vb = real
+                    dump_hash = real['vb_hash']
+                    dump_path = real['path']
+                    # 偽メッシュは 220k 等で大きいため正規カウントでスライス
+                    all_pv = [display_to_position_vb(tuple(v.co)) for v in mesh.vertices]
+                    rv = real['vert_count']
+                    if len(all_pv) >= rv:
+                        pv_verts = all_pv[:rv]
+                    else:
+                        pv_verts = all_pv + [(0.0, 0.0, 0.0)] * (rv - len(all_pv))
+                    # unit vert_count は正規のカウントで上書き
+                    vert_count = rv
+                else:
+                    # 通常: pre-skin position buffer (same vertex count)
+                    position_vb = find_position_vb(
+                        _dump_cache, vb0, vert_count)
+                    if position_vb is None:
+                        self.report({'ERROR'}, f"{name}: pre-skin position_vb for "
+                                               f"{vb0} not found (skinning "
+                                               f"vs={props.position_vs}). The dump "
+                                               f"lacks the skinning pass vb0; "
+                                               f"re-dump and re-run Analyze Dump.")
+                        return {'CANCELLED'}
+                    dump_hash = position_vb['vb_hash']
+                    dump_path = position_vb['path']
+                    pv_verts = [display_to_position_vb(tuple(v.co))
+                                for v in mesh.vertices]
                 # Bennett-mimic: overwrite only the position float3 of
                 # the real pre-skin vb0. normal/tangent stay from the
                 # dump; the game VS re-skins the new positions, so the
