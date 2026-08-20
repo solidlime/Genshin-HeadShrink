@@ -101,6 +101,57 @@ def _scan_vb_ps_t0_map(dump_dir):
     return out
 
 
+def _scan_ib_splits(dump_dir):
+    """Parse log.txt DrawIndexed -> {ib_hash: [(first_index, index_count)...]}.
+
+    Scans each FrameAnalysis*/log.txt under dump_dir. IASetIndexBuffer hash
+    -> subsequent DrawIndexed(IndexCount, StartIndexLocation) is recorded.
+    deduped per hash. Returns {} when no log.txt found.
+    """
+    splits: dict = {}
+    try:
+        walk = list(os.walk(dump_dir))
+    except OSError:
+        return {}
+    log_paths = []
+    for root, _dirs, files in walk:
+        for fn in files:
+            if fn.lower() == 'log.txt':
+                log_paths.append(os.path.join(root, fn))
+    ib_re = re.compile(r'IASetIndexBuffer.*hash=([0-9a-f]{8})', re.IGNORECASE)
+    draw_re = re.compile(r'DrawIndexed\(IndexCount:(\d+),\s*StartIndexLocation:(\d+)')
+    for lp in log_paths:
+        try:
+            with open(lp, encoding='utf-8', errors='ignore') as f:
+                cur_ib = None
+                for line in f:
+                    m = ib_re.search(line)
+                    if m:
+                        cur_ib = m.group(1).lower()
+                    m2 = draw_re.search(line)
+                    if m2 and cur_ib:
+                        cnt = int(m2.group(1))
+                        first = int(m2.group(2))
+                        splits.setdefault(cur_ib, set()).add((first, cnt))
+                        cur_ib = None
+        except OSError:
+            continue
+    return {k: sorted(v) for k, v in splits.items()}
+
+
+def _find_ib_path(dump_dir, ib_hash):
+    """Find any .buf file whose name contains ib=<hash>."""
+    h = ib_hash.lower()[:8]
+    try:
+        for root, _dirs, files in os.walk(dump_dir):
+            for fn in files:
+                if f'ib={h}' in fn.lower():
+                    return os.path.join(root, fn)
+    except OSError:
+        pass
+    return ''
+
+
 def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     """Scan a 3DMigoto frame dump dir -> list of (vb0, ib) pairs.
 
@@ -191,6 +242,61 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
             'vs': vs_m.group(1) if vs_m else '',
         })
     _dump_cache['position_vb'] = position_vb
+    try:
+        ib_splits = _scan_ib_splits(dump_dir)
+    except Exception:
+        ib_splits = {}
+    _dump_cache['ib_splits'] = ib_splits
+    # Fallback: IB が match_first_index で Head/Body/Dress に分割されるケース
+    # (例: Lan Yan 1066a76c: [0,41385,85527]) は vb0=e9049ebd と ib=1066a76c が
+    # 同フレームでペアにならず out が空に見える。position_vb と log.txt の
+    # ib_splits から Body 合成ペアを生成し、select_import_pairs で正しい Body
+    # が選ばれるようにする。
+    if ib_splits:
+        existing_vb0s = {p['vb0'] for p in out}
+        # position_vb の中でまだペアになっていない候補 (500..100k でゴミ除外)
+        cand_list = [(h, info) for h, info in position_vb.items()
+                     if h not in existing_vb0s
+                     and 500 < info['vert_count'] < 100000]
+        if cand_list:
+            cand_hash, cand_info = max(cand_list, key=lambda x: x[1]['vert_count'])
+            # 最も分割数の多い / 最大総indexの IB を Body 候補として選ぶ
+            best_ib = None
+            best_splits = None
+            best_total = -1
+            for ib_hash, splits in ib_splits.items():
+                if len(splits) < 2:
+                    continue
+                total = sum(c for _, c in splits)
+                if total > best_total:
+                    best_total = total
+                    best_ib = ib_hash
+                    best_splits = splits
+            if best_ib and best_splits:
+                if (cand_hash, best_ib) not in seen:
+                    ib_path = _find_ib_path(dump_dir, best_ib)
+                    if not ib_path:
+                        for p in out:
+                            if p['ib'] == best_ib:
+                                ib_path = p['ib_path']
+                                break
+                    if ib_path:
+                        body_first, body_cnt = max(best_splits, key=lambda x: x[1])
+                        out.append({
+                            'vb0': cand_hash,
+                            'ib': best_ib,
+                            'first_index': body_first,
+                            'first_count': body_cnt,
+                            'ib_splits': best_splits,
+                            'is_split': True,
+                            'frame': 'synthetic:' + best_ib[:8],
+                            'vert_count': cand_info['vert_count'],
+                            'index_count': body_cnt,
+                            'vb0_path': cand_info['path'],
+                            'ib_path': ib_path,
+                            'vs': cand_info.get('vs', '')[:8] if cand_info.get('vs') else '',
+                        })
+                        seen.add((cand_hash, best_ib))
     try:
         _dump_cache['vb_ps_t0'] = _scan_vb_ps_t0_map(dump_dir)
     except Exception:
@@ -603,18 +709,48 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     for u in units:
         n = u['name']
         if mode == 'VB_REPLACE' and u.get('role') == 'BODY':
+            ib_hash = u.get('ib') or u.get('ib_hash')
+            splits = u.get('ib_splits')
+            has_split = bool(ib_hash and splits and len(splits) >= 2)
+            # Lan Yan など IB 分割方式では Position と IB Body が同名で衝突するため
+            # Position の TextureOverride 名を charPosition に退避しつつ
+            # Resource/ファイルは従来の n (=charBody) のままにして ExportDiff の
+            # 書き出し (namePosition.buf) と一致させる
+            pos_override = f"{char}Position" if has_split else n
+            pos_resource = n
             parts += [
-                f"[TextureOverride{n}]",
+                f"[TextureOverride{pos_override}]",
                 f"hash = {u['vb_hash']}",
-                f"vb0 = Resource{n}Position",
+                f"vb0 = Resource{pos_resource}Position",
                 "$is = 1",
                 "",
-                f"[Resource{n}Position]",
+                f"[Resource{pos_resource}Position]",
                 "type = Buffer",
                 f"stride = {DUMP_STRIDE}",
-                f"filename = {n}Position.buf",
+                f"filename = {pos_resource}Position.buf",
                 "",
             ]
+            # IB match_first_index split (e.g. Lan Yan 1066a76c: Head 0 / Body 41385 / Dress 85527)
+            # 補助: u に ib / ib_splits があれば Head/Body/Dress の 3分割を出力
+            if has_split:
+                splits_sorted = sorted(splits)
+                part_names = ['Head', 'Body', 'Dress']
+                for idx, (first, cnt) in enumerate(splits_sorted):
+                    part = part_names[idx] if idx < len(part_names) else f'Part{idx}'
+                    res_name = f"{char}{part}"
+                    # 同一 char で複数 BODY が無い想定、重複は呼び出し側でユニーク化済み
+                    parts += [
+                        f"[TextureOverride{res_name}]",
+                        f"hash = {ib_hash}",
+                        f"match_first_index = {first}",
+                        f"ib = Resource{res_name}IB",
+                        "",
+                        f"[Resource{res_name}IB]",
+                        "type = Buffer",
+                        "format = DXGI_FORMAT_R32_UINT",
+                        f"filename = {res_name}.ib",
+                        "",
+                    ]
             continue
         # effieface式 $is ゲート: BODY は VB置換のトリガーなので対象外、face系のみ if $is
         _use_is = bool(gate_hash and u.get('role') != 'BODY')
@@ -2424,7 +2560,11 @@ def _preview_setup_impl(self, context):
                         continue
                     face_center = tuple(
                         sum(p[i] for p in verts) / len(verts) for i in range(3))
-                    o.location = (0.0, 0.0, head_center[2] - face_center[2])
+                    if use_pv_placement:
+                        # PVフォールバック: x,yは0固定 (対称性維持)
+                        o.location = (0.0, 0.0, head_center[2] - face_center[2])
+                    else:
+                        o.location = tuple(head_center[i] - face_center[i] for i in range(3))
         # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
         # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
         for o in preview_objs:
@@ -2451,7 +2591,7 @@ def _preview_setup_impl(self, context):
                 for o in face_objs:
                     loc = matched.get(o.get('hs_vb0_hash', ''))
                     if loc is not None:
-                        o.location = (0.0, 0.0, loc[2])
+                        o.location = loc
         # Record the final placement (after auto-placement + saved offsets)
         # so Reset Preview can restore G-key moved faces to the setup-time
         # position. Stored per-vertex (POINT domain) like hs_original_pos;
@@ -2859,8 +2999,61 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 with open(os.path.join(output_dir, f"{name}Position.buf"),
                           'wb') as f:
                     f.write(pos_data)
-                units.append({'name': name, 'vb_hash': dump_hash,
-                              'vert_count': vert_count, 'role': 'BODY'})
+                # IB match_first_index split (Lan Yan) — 検出した ib_splits を unit に付与
+                ib_hash = None
+                ib_splits = None
+                try:
+                    splits_map = _dump_cache.get('ib_splits') or {}
+                    if splits_map:
+                        # 最適な IB (分割数>=2で総index最大) を Body に紐付け
+                        best = None
+                        best_total = -1
+                        for kh, sp in splits_map.items():
+                            if len(sp) >= 2:
+                                tot = sum(c for _, c in sp)
+                                if tot > best_total:
+                                    best_total = tot
+                                    best = (kh, sp)
+                        if best:
+                            ib_hash, ib_splits = best
+                except Exception:
+                    pass
+                # IB ファイルを R32 で書き出し (INI の Resource と対応)
+                if ib_hash and ib_splits:
+                    dump_dir_for_ib = getattr(prefs, 'dump_dir', '')
+                    try:
+                        dump_dir_for_ib = bpy.path.abspath(dump_dir_for_ib) if dump_dir_for_ib else ''
+                    except Exception:
+                        pass
+                    ib_path = _find_ib_path(dump_dir_for_ib, ib_hash) if dump_dir_for_ib else ''
+                    if ib_path and os.path.exists(ib_path):
+                        try:
+                            with open(ib_path, 'rb') as f:
+                                ib_data = f.read()
+                            for idx2, (first2, cnt2) in enumerate(sorted(ib_splits)):
+                                part2 = ['Head', 'Body', 'Dress'][idx2] if idx2 < 3 else f'Part{idx2}'
+                                res_name2 = f"{char_name}{part2}"
+                                s = first2 * DUMP_INDEX_BYTES
+                                e = (first2 + cnt2) * DUMP_INDEX_BYTES
+                                sl = ib_data[s:e]
+                                if sl:
+                                    # R16 -> R32
+                                    n = len(sl) // DUMP_INDEX_BYTES
+                                    try:
+                                        indices = struct.unpack(f'<{n}H', sl)
+                                        sl = struct.pack(f'<{n}I', *indices)
+                                    except Exception:
+                                        pass
+                                    with open(os.path.join(output_dir, f"{res_name2}.ib"), 'wb') as outf:
+                                        outf.write(sl)
+                        except Exception:
+                            pass
+                    units.append({'name': name, 'vb_hash': dump_hash,
+                                  'vert_count': vert_count, 'role': 'BODY',
+                                  'ib': ib_hash, 'ib_splits': ib_splits})
+                else:
+                    units.append({'name': name, 'vb_hash': dump_hash,
+                                  'vert_count': vert_count, 'role': 'BODY'})
                 primary_for_key[('BODY', vert_count)] = name
                 continue
             # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
