@@ -101,6 +101,43 @@ def _scan_vb_ps_t0_map(dump_dir):
     return out
 
 
+def _scan_drawn_vb0(dump_dir):
+    """Draw-visible vb0 hashes (exclude SO-only like bbdaf598)."""
+    drawn = set()
+    try:
+        walk = list(os.walk(dump_dir))
+    except OSError:
+        return drawn
+    log_paths = [os.path.join(r, f) for r, _, fs in walk for f in fs if f.lower() == 'log.txt']
+    hr = re.compile(r'hash=([0-9a-fA-F]{8})')
+    tr = re.compile(r'IASetPrimitiveTopology\(Topology:(\d+)')
+    for lp in log_paths:
+        try:
+            lines = open(lp, encoding='utf-8', errors='ignore').readlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            if 'DrawIndexed(' not in line and not re.search(r'\bDraw\(VertexCount', line):
+                continue
+            # topology check: skip pointlist skinning
+            topo = None
+            for k in range(i, max(-1, i-40), -1):
+                m = tr.search(lines[k])
+                if m:
+                    topo = m.group(1)
+                    break
+            if topo == '1':
+                continue
+            for k in range(i-1, max(-1, i-40), -1):
+                if 'IASetVertexBuffers' in lines[k]:
+                    for t in range(k+1, i):
+                        if 'resource=' in lines[t] or 'view=' in lines[t]:
+                            for hm in hr.finditer(lines[t]):
+                                drawn.add(hm.group(1).lower()[:8])
+                    break
+    return drawn
+
+
 def _scan_ib_splits(dump_dir):
     """Parse log.txt DrawIndexed -> {ib_hash: [(first_index, index_count)...]}.
 
@@ -297,6 +334,17 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
             'vb0_path': vb0_path, 'ib_path': ib_path,
             'vs': vs_m.group(1) if vs_m else '',
         })
+    # Draw-filter for position_vb: exclude SO-only hashes (e.g. bbdaf598)
+    try:
+        drawn_vb0 = _scan_drawn_vb0(dump_dir)
+    except Exception:
+        drawn_vb0 = set()
+    _dump_cache['drawn_vb0'] = drawn_vb0
+    if drawn_vb0:
+        # keep only drawn hashes; fallback to original when filter empties (log incomplete)
+        filtered = {h: info for h, info in position_vb.items() if h.lower()[:8] in drawn_vb0}
+        if filtered:
+            position_vb = filtered
     _dump_cache['position_vb'] = position_vb
     try:
         ib_splits = _scan_ib_splits(dump_dir)
@@ -670,8 +718,20 @@ def find_position_vb(dump_cache, vb_hash, vert_count):
     transplanted directly (the game VS re-skins them every frame). Returns
     {'path', 'vert_count', 'vs', 'vb_hash'} for the first position_vb whose
     vert_count matches, else None.
+
+    Drawn filter: when _dump_cache['drawn_vb0'] is non-empty (log.txt present),
+    only hashes that were seen before a non-pointlist Draw are considered.
+    bbdaf598 (SO-only) is thus excluded in favour of e36be83b. Falls back to
+    unfiltered when the filter would eliminate all candidates (log missing or
+    incomplete).
     """
     position_vb = (dump_cache or {}).get('position_vb') or {}
+    drawn = (dump_cache or {}).get('drawn_vb0')
+    if drawn:
+        filtered = {h: info for h, info in position_vb.items() if h.lower()[:8] in drawn}
+        # fallback to full set when filter empties (log missing hash)
+        if filtered:
+            position_vb = filtered
     for h, info in position_vb.items():
         if info.get('vert_count') == vert_count:
             return dict(info, vb_hash=h)
@@ -981,7 +1041,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                     f"Resource{n}_{h}Dif = copy cs-u1",
                     "post cs-u1 = null",
                     "",
-                ]
+                 ]
     return "\n".join(parts)
 
 
@@ -3418,16 +3478,59 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                     merged.append(h)
         # Bodyハッシュ優先ゲート (キャラ固有, 共有皮膚テクスチャ d4841e1a 等の波及を防ぐ)
         # units内 BODY の vb_hash (= position_vb hash, 例 Yanfei eb8b62d3) を $is トリガーに使用
+        # Drawフィルター: SO-only hash (bbdaf598) は除外し Draw可視 hash (e36be83b) を優先
         # 無ければ faceDiffuse にフォールバック、どちらも無ければゲート無し
         body_hash = next((u['vb_hash'] for u in units if u.get('role') == 'BODY'), None)
+        drawn_for_gate = _dump_cache.get('drawn_vb0') or set()
+        if body_hash and drawn_for_gate and body_hash.lower()[:8] not in drawn_for_gate:
+            body_vc = next((u['vert_count'] for u in units if u.get('role') == 'BODY'), None)
+            if body_vc:
+                # scan for a drawn vb0 with same vert_count (e.g. Mizuki e36be83b 22226)
+                alt = None
+                scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+                if scan_dir:
+                    try:
+                        scan_dir = os.path.abspath(scan_dir) if hasattr(scan_dir, 'lower') else str(scan_dir)
+                    except Exception:
+                        pass
+                    if os.path.isdir(scan_dir):
+                        for root2, _, files2 in os.walk(scan_dir):
+                            for fn2 in files2:
+                                if not fn2.lower().endswith('.buf'):
+                                    continue
+                                m2 = _DUMP_FRAME_RE.match(fn2)
+                                if m2:
+                                    hh = m2.group(2).lower()[:8]
+                                elif os.path.basename(root2) == 'deduped':
+                                    hh = os.path.splitext(fn2)[0].lower()
+                                    if not hh or len(hh) != 8:
+                                        continue
+                                else:
+                                    continue
+                                if hh not in drawn_for_gate:
+                                    continue
+                                p2 = os.path.join(root2, fn2)
+                                try:
+                                    vc2 = os.path.getsize(p2) // DUMP_STRIDE
+                                except OSError:
+                                    continue
+                                if vc2 == body_vc:
+                                    alt = hh
+                                    break
+                            if alt:
+                                break
+                if alt:
+                    body_hash = alt
         face_diffuse_hash = None
         if not body_hash:
             face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
             face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
+        # IB split overrides (Head/Body/Dress) via match_first_index: pass external ib_splits to build_diff_ini
+        ib_splits_for_ini = _dump_cache.get('ib_splits') if _has_ib_split(_dump_cache.get('ib_splits') or {}) else None
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
-            f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash, body_hash))
+            f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash, body_hash, ib_splits_for_ini))
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"
