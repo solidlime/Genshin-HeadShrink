@@ -576,6 +576,56 @@ class BuildDiffIniModeTest(unittest.TestCase):
         ])
         self.assertIn('run = CommandListNoelleHead', ini)
 
+    def test_ib_split_emits_catchall_before_parts(self):
+        # IB分割キャラ (Mizuki/LanYan): per-part override の前に
+        # キャッチオール [TextureOverride{char}IB] handling=skip drawindexed=auto
+        ini = hs.build_diff_ini('Mizuki', [
+            {'name': 'MizukiBody', 'vb_hash': 'e36be83b', 'vert_count': 15965,
+             'role': 'BODY', 'ib': 'ec1ed3c9',
+             'ib_splits': [(0, 100), (44274, 200), (85404, 300)]},
+        ])
+        for needle in [
+            '[TextureOverrideMizukiIB]',
+            'hash = ec1ed3c9',
+            'handling = skip',
+            'drawindexed = auto',
+            '[TextureOverrideMizukiHead]',
+            'match_first_index = 0',
+            '[TextureOverrideMizukiBody]',
+            'match_first_index = 44274',
+            '[TextureOverrideMizukiDress]',
+            'match_first_index = 85404',
+        ]:
+            self.assertIn(needle, ini)
+        # キャッチオールは per-part より前
+        self.assertLess(ini.index('[TextureOverrideMizukiIB]'),
+                        ini.index('[TextureOverrideMizukiHead]'))
+
+    def test_ib_split_param_emits_catchall(self):
+        # ib_splits 引数経由 (units に ib 無し) でもキャッチオールを出す
+        ini = hs.build_diff_ini('Mizuki', [
+            {'name': 'MizukiBody', 'vb_hash': 'e36be83b', 'vert_count': 15965,
+             'role': 'BODY'},
+        ], ib_splits={'ec1ed3c9': [(0, 100), (44274, 200), (85404, 300)]})
+        for needle in [
+            '[TextureOverrideMizukiIB]',
+            'hash = ec1ed3c9',
+            'handling = skip',
+            'drawindexed = auto',
+        ]:
+            self.assertIn(needle, ini)
+        self.assertLess(ini.index('[TextureOverrideMizukiIB]'),
+                        ini.index('[TextureOverrideMizukiHead_ec1ed3c9]'))
+
+    def test_no_split_no_catchall(self):
+        # Noelle系 (IB分割無し) はキャッチオールを出さない
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleBody', 'vb_hash': 'def7af36', 'vert_count': 15965,
+             'role': 'BODY'},
+        ])
+        self.assertNotIn('handling = skip', ini)
+        self.assertNotIn('drawindexed = auto', ini)
+
 
 class PositionBufTest(unittest.TestCase):
     """Position.buf helper: dump vb0 bytes with position float3 replaced,

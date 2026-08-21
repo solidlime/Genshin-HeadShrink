@@ -963,6 +963,15 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
             # IB match_first_index split (e.g. Lan Yan 1066a76c: Head 0 / Body 41385 / Dress 85527)
             # 補助: u に ib / ib_splits があれば Head/Body/Dress の 3分割を出力
             if has_split:
+                # キャッチオール: match_first_index に掛からない Body/Dress の
+                # DrawIndexed がスライスIB範囲外を読むのを防ぐ (LanYanMod 実証済み)
+                parts += [
+                    f"[TextureOverride{char}IB]",
+                    f"hash = {ib_hash}",
+                    "handling = skip",
+                    "drawindexed = auto",
+                    "",
+                ]
                 splits_sorted = sorted(splits)[:3]
                 part_names = ['Head', 'Body', 'Dress']
                 for idx, (first, cnt) in enumerate(splits_sorted):
@@ -1129,6 +1138,13 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                     norm.append((int(e[0]), int(e[1]) if len(e) > 1 else 0))
                 else:
                     norm.append((int(e), 0))
+            parts += [
+                f"[TextureOverride{char}IB]",
+                f"hash = {key}",
+                "handling = skip",
+                "drawindexed = auto",
+                "",
+            ]
             for idx, (first, _c) in enumerate(sorted(norm)[:3]):
                 part = ['Head', 'Body', 'Dress'][idx]
                 res = f"{char}{part}"
