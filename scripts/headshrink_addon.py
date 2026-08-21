@@ -3773,10 +3773,19 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
             f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash, body_hash, ib_splits_for_ini))
+        # サマリ: Gate($is) に使った BODY vb_hash、unit 数、Position が
+        # pre-skin (position buffer) か draw (CopyDispatch) かを報告
+        position_kind = ('pre-skin' if any(
+            u.get('position_hash') for u in units) else 'draw')
         self.report({'INFO'}, f"Diff mod exported to {output_dir} "
                               f"({len(units)} unit(s): "
                               f"{', '.join(u['name'] for u in units)})"
-                              f"{'; cleared ' + str(cleared) + ' stale file(s)' if cleared else ''}")
+                              f"{'; cleared ' + str(cleared) + ' stale file(s)' if cleared else ''}"
+                              f" | Gate($is)={body_hash} | Position={position_kind}")
+        try:
+            bpy.ops.wm.path_open(filepath=output_dir)
+        except Exception:
+            pass
         return {'FINISHED'}
 
 
