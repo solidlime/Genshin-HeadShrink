@@ -337,6 +337,22 @@ class OriginSeparationTest(unittest.TestCase):
             self.assertAlmostEqual(x, y)
 
 
+class PerAxisShrinkTest(unittest.TestCase):
+    def test_per_axis_scales_only_x(self):
+        verts = [(0.0, 0.0, 0.0), (2.0, 2.0, 2.0)]
+        out = hs.shrink_positions(verts, (1, 1, 1), (1, 1, 1), 1.0,
+                                  0.0, (0, 0, 0), False, (1, 1, 1),
+                                  axis_scale=(0.5, 1.0, 1.0))
+        self.assertEqual(out[0], (0.5, 0.0, 0.0))
+        self.assertEqual(out[1], (1.5, 2.0, 2.0))
+
+    def test_uniform_when_axis_scale_none(self):
+        verts = [(0.0, 0.0, 0.0)]
+        out = hs.shrink_positions(verts, (0, 0, 0), (1, 1, 1), 0.5,
+                                  axis_scale=None)
+        self.assertEqual(out[0], (0.0, 0.0, 0.0))
+
+
 class ReplacePositionsTest(unittest.TestCase):
     def test_pos_only_overwritten(self):
         data = make_vb(3)
@@ -1056,6 +1072,7 @@ class CharConfigTest(unittest.TestCase):
         props = types.SimpleNamespace(
             shrink_center=(0.1, 0.2, 0.3),
             shrink_half=(0.5, 0.25, 0.35), shrink_scale=0.88,
+            shrink_scale_mode='UNIFORM', shrink_scale_xyz=(0.95, 0.95, 0.95),
             shrink_falloff=0.2, shrink_shift=(0.0, 0.0, 0.0),
             face_full_transform=False,
             face_offset_eye=(0.01, 0.02, 0.03),
@@ -1065,6 +1082,8 @@ class CharConfigTest(unittest.TestCase):
         cfg = hs.extract_char_config(props)
         self.assertEqual(cfg['shrink_center'], [0.1, 0.2, 0.3])
         self.assertEqual(cfg['shrink_scale'], 0.88)
+        self.assertEqual(cfg['shrink_scale_mode'], 'UNIFORM')
+        self.assertEqual(cfg['shrink_scale_xyz'], [0.95, 0.95, 0.95])
         self.assertFalse(cfg['face_full_transform'])
         self.assertEqual(cfg['face_offset_eye'], [0.01, 0.02, 0.03])
         self.assertEqual(cfg['face_offset_mouth'], [0.04, 0.05, 0.06])
@@ -2042,7 +2061,9 @@ class FaceOffsetApplyTest(unittest.TestCase):
         try:
             props = types.SimpleNamespace(
                 shrink_center=(1.0, 1.0, 1.0), shrink_half=(1.0, 1.0, 1.0),
-                shrink_scale=0.5, shrink_falloff=0.0,
+                shrink_scale=0.5, shrink_scale_mode='UNIFORM',
+                shrink_scale_xyz=(0.95, 0.95, 0.95),
+                shrink_falloff=0.0,
                 shrink_shift=(0.0, 0.0, 0.0),
                 face_offset_eye=offsets.get('EYES', (0.0, 0.0, 0.0)),
                 face_offset_mouth=offsets.get('MOUTH', (0.0, 0.0, 0.0)),

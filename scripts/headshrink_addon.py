@@ -585,7 +585,7 @@ def display_to_position_vb(p):
 
 def preview_shrink_mesh(mesh, center, half, scale, offset=(0.0, 0.0, 0.0),
                         falloff=0.0, shift=(0.0, 0.0, 0.0), all_verts=False,
-                        origin=None):
+                        origin=None, axis_scale=None):
     """Recompute vertex coords from hs_original_pos (non-accumulating).
 
     Shrink-box test and scaling happen in display space (vertex + object
@@ -593,8 +593,9 @@ def preview_shrink_mesh(mesh, center, half, scale, offset=(0.0, 0.0, 0.0),
     behaves exactly like plain local-space shrinking. all_verts=True skips
     the box test (uniform shrink+shift over the whole mesh). origin is the
     scale pivot in display coords; callers pass the box center so shrinking
-    heads toward the box middle. Returns True when applied; False when the
-    mesh has no hs_original_pos attribute.
+    heads toward the box middle. axis_scale=(sx,sy,sz) is forwarded to
+    shrink_positions for per-axis scaling (None = uniform). Returns True when
+    applied; False when the mesh has no hs_original_pos attribute.
     """
     attr = mesh.attributes.get('hs_original_pos')
     if attr is None:
@@ -605,7 +606,7 @@ def preview_shrink_mesh(mesh, center, half, scale, offset=(0.0, 0.0, 0.0),
     base = [tuple(flat[i:i + 3]) for i in range(0, len(flat), 3)]
     show = [(p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]) for p in base]
     moved = shrink_positions(show, center, half, scale, falloff, shift,
-                             all_verts, origin)
+                             all_verts, origin, axis_scale)
     for v, p in enumerate(moved):
         mesh.vertices[v].co = (p[0] - offset[0], p[1] - offset[1],
                                p[2] - offset[2])
@@ -717,7 +718,8 @@ def in_shrink_box(pos, center, half):
 
 
 def shrink_positions(verts, center, half, scale, falloff=0.0,
-                     shift=(0.0, 0.0, 0.0), all_verts=False, origin=None):
+                     shift=(0.0, 0.0, 0.0), all_verts=False, origin=None,
+                     axis_scale=None):
     """[(x,y,z)...] -> [(x',y',z')...] with a smooth boundary fade.
 
     In-box verts (normalized distance d <= 1) scale about the pivot by 'scale'
@@ -738,10 +740,17 @@ def shrink_positions(verts, center, half, scale, falloff=0.0,
     origin + (p - origin) * scale + shift (uniform shrink+shift). Used for
     small standalone face meshes so the whole part moves as one and no
     seams/tears appear between parts. half/falloff are ignored in that mode.
+
+    axis_scale=(sx,sy,sz) overrides the per-axis shrink factor (uniform
+    'scale' is then unused); None keeps the legacy uniform behavior. The
+    falloff band blends each axis independently: s_i = axis_scale[i] +
+    (1 - axis_scale[i]) * t.
     """
     pivot = origin if origin is not None else center
+    if axis_scale is None:
+        axis_scale = (scale, scale, scale)
     if all_verts:
-        return [tuple(pivot[i] + (p[i] - pivot[i]) * scale + shift[i]
+        return [tuple(pivot[i] + (p[i] - pivot[i]) * axis_scale[i] + shift[i]
                       for i in range(3)) for p in verts]
     out = []
     for p in verts:
@@ -751,17 +760,18 @@ def shrink_positions(verts, center, half, scale, falloff=0.0,
         else:  # collapsed box: legacy behavior keeps everything in place
             d = float('inf')
         if d <= 1.0:
-            s, t = scale, 1.0
+            s, t = axis_scale, 1.0
         elif falloff > 0.0 and d <= 1.0 + falloff:
             t = (d - 1.0) / falloff
-            s = scale + (1.0 - scale) * t
+            s = tuple(axis_scale[i] + (1.0 - axis_scale[i]) * t
+                      for i in range(3))
             t = 1.0 - t  # shift fades to 0 across the band
         else:
-            s, t = 1.0, 0.0
-        if s == 1.0 and t == 0.0:
+            s, t = (1.0, 1.0, 1.0), 0.0
+        if s == (1.0, 1.0, 1.0) and t == 0.0:
             out.append(tuple(p))
         else:
-            out.append(tuple(pivot[i] + (p[i] - pivot[i]) * s + shift[i] * t
+            out.append(tuple(pivot[i] + (p[i] - pivot[i]) * s[i] + shift[i] * t
                              for i in range(3)))
     return out
 
@@ -1547,6 +1557,8 @@ def extract_char_config(props):
         'shrink_center': [float(v) for v in props.shrink_center],
         'shrink_half': [float(v) for v in props.shrink_half],
         'shrink_scale': float(props.shrink_scale),
+        'shrink_scale_mode': str(props.shrink_scale_mode),
+        'shrink_scale_xyz': [float(v) for v in props.shrink_scale_xyz],
         'shrink_falloff': float(props.shrink_falloff),
         'shrink_shift': [float(v) for v in props.shrink_shift],
         'face_full_transform': bool(props.face_full_transform),
@@ -1722,13 +1734,18 @@ def _preview_props_update(self, context):
     scale = self.shrink_scale
     falloff = self.shrink_falloff
     shift = tuple(self.shrink_shift)
+    if self.shrink_scale_mode == 'PER_AXIS':
+        axis_scale = tuple(self.shrink_scale_xyz)
+        scale = 1.0  # unused in this mode
+    else:
+        axis_scale = None
     meshes = [o for o in coll.objects if o.type == 'MESH']
     for obj in meshes:
         if is_body_mesh(obj, meshes):
             # BODY: box 内縮小、pivot = box 中央 (v2.0.0 固定) — sanitized half
             preview_shrink_mesh(obj.data, center, half_body, scale,
                                 tuple(obj.location), falloff, shift,
-                                False, center)
+                                False, center, axis_scale)
         else:
             # 顔メッシュ: box 内縮小、pivot = box 中央 (hs_face_origin 基準)
             # BODY と同じ box 判定 (center/half) を使い、box 外の頂点は不変
@@ -1736,7 +1753,7 @@ def _preview_props_update(self, context):
             if pivot is not None:
                 preview_shrink_mesh(obj.data, center, half_body, scale,
                                     tuple(obj.location), falloff, shift,
-                                    False, pivot)
+                                    False, pivot, axis_scale)
                 off = _face_offset_for_role(self, obj.get('hs_role'))
                 if off is not None:
                     _apply_face_offset(obj, tuple(off))
@@ -2071,6 +2088,15 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
         description="Vertices inside the box are scaled about Shrink Center by this factor (live)",
         default=0.95, min=0.1, max=1.0, step=0.01, precision=3,
         update=_preview_props_update,
+    )
+    shrink_scale_mode: bpy.props.EnumProperty(
+        name="Scale Mode",
+        items=[('UNIFORM', 'Uniform XYZ', ''), ('PER_AXIS', 'Per Axis', '')],
+        default='UNIFORM', update=_preview_props_update,
+    )
+    shrink_scale_xyz: bpy.props.FloatVectorProperty(
+        name="Scale XYZ", size=3, default=(0.95, 0.95, 0.95),
+        min=0.1, max=1.0, subtype='XYZ', update=_preview_props_update,
     )
     shrink_falloff: bpy.props.FloatProperty(
         name="Shrink Falloff",
@@ -3172,6 +3198,11 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
         scale = props.shrink_scale
         falloff = props.shrink_falloff
         shift = tuple(props.shrink_shift)
+        if props.shrink_scale_mode == 'PER_AXIS':
+            axis_scale = tuple(props.shrink_scale_xyz)
+            scale = 1.0  # unused in this mode
+        else:
+            axis_scale = None
         meshes = [o for o in coll.objects if o.type == 'MESH']
         count = 0
         for obj in meshes:
@@ -3179,14 +3210,14 @@ class NHS_OT_PreviewApply(bpy.types.Operator):
                 # BODY: sanitized half (0/微小 -> 0.15) for uniform shrink
                 if preview_shrink_mesh(obj.data, center, half_body, scale,
                                        tuple(obj.location), falloff, shift,
-                                       False, center):
+                                       False, center, axis_scale):
                     count += 1
             else:
                 # 顔メッシュ: 同じ sanitized box で判定
                 pivot = _face_shrink_pivot(obj, center)
                 if pivot is not None and preview_shrink_mesh(
                         obj.data, center, half_body, scale, tuple(obj.location),
-                        falloff, shift, False, pivot):
+                        falloff, shift, False, pivot, axis_scale):
                     count += 1
                     off = _face_offset_for_role(props, obj.get('hs_role'))
                     if off is not None:
@@ -3825,7 +3856,11 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.label(text="── Shrink ──", icon='DOWNARROW_HLT')
         box.prop(props, "shrink_center")
         box.prop(props, "shrink_half")
-        box.prop(props, "shrink_scale")
+        box.prop(props, "shrink_scale_mode", text="")
+        if props.shrink_scale_mode == 'PER_AXIS':
+            box.prop(props, "shrink_scale_xyz")
+        else:
+            box.prop(props, "shrink_scale")
         box.prop(props, "shrink_falloff")
         box.prop(props, "shrink_shift")
         box.label(text="── Face Offset ──", icon='DOWNARROW_HLT')
