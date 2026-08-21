@@ -2718,18 +2718,22 @@ def _face_shrink_pivot(obj, center):
     return _face_mesh_center(obj)
 
 
+# ロール -> face_offset プロパティ名 (apply / auto-fill 共通)
+_FACE_OFFSET_PROPS = {
+    'EYES': 'face_offset_eye',
+    'MOUTH': 'face_offset_mouth',
+    'BROW': 'face_offset_brow',
+}
+
+
 def _face_offset_for_role(props, role):
     """ロールに応じた face_offset プロパティ値を返す。
 
     EYES/MOUTH/BROW はそれぞれ専用プロパティ (face_offset_eye/mouth/brow) を
     返す。それ以外 (OTHER 等) は None (オフセット適用なし)。
     """
-    mapping = {
-        'EYES': getattr(props, 'face_offset_eye', None),
-        'MOUTH': getattr(props, 'face_offset_mouth', None),
-        'BROW': getattr(props, 'face_offset_brow', None),
-    }
-    return mapping.get(role)
+    name = _FACE_OFFSET_PROPS.get(role)
+    return getattr(props, name, None) if name else None
 
 
 def _apply_face_offset(obj, offset):
@@ -3288,6 +3292,59 @@ class NHS_OT_RepositionFaces(bpy.types.Operator):
             o['hs_face_origin'] = tuple(loc)
             count += 1
         self.report({'INFO'}, f"Repositioned {count}/{len(targets)} face mesh(es)")
+        return {'FINISHED'}
+
+
+class NHS_OT_AutoFaceOffsets(bpy.types.Operator):
+    bl_idname = "headshrink.auto_face_offsets"
+    bl_label = "Auto Fill Offsets"
+    bl_description = ("Compute post-shrink face-to-body gaps and fill "
+                      "Eye/Mouth/Brow offsets")
+
+    def execute(self, context):
+        if bpy.context.mode == 'EDIT_MESH':
+            self.report({'ERROR'}, "Edit モード中は実行できません")
+            return {'CANCELLED'}
+        props = context.scene.headshrink_props
+        coll = bpy.data.collections.get(PREVIEW_COLLECTION)
+        if coll is None:
+            self.report({'ERROR'}, f"No {PREVIEW_COLLECTION} collection")
+            return {'CANCELLED'}
+        meshes = [o for o in coll.objects if o.type == 'MESH']
+        body = next((o for o in meshes if is_body_mesh(o, meshes)), None)
+        if body is None:
+            self.report({'ERROR'}, "No BODY mesh in preview")
+            return {'CANCELLED'}
+        import numpy as _np
+        body_pts = _np.asarray(
+            [tuple(v.co[i] + body.location[i] for i in range(3))
+             for v in body.data.vertices], dtype=_np.float64)
+        filled = 0
+        for role, prop_name in _FACE_OFFSET_PROPS.items():
+            objs = [o for o in meshes if o.get('hs_role') == role]
+            if not objs:
+                continue
+            diffs = []
+            for o in objs:
+                pts = _np.asarray(
+                    [tuple(v.co[i] + o.location[i] for i in range(3))
+                     for v in o.data.vertices], dtype=_np.float64)
+                for start in range(0, len(pts), 256):
+                    chunk = pts[start:start + 256]
+                    d = chunk[:, None, :] - body_pts[None, :, :]
+                    dist2 = _np.einsum('ijk,ijk->ij', d, d)
+                    nearest = _np.argmin(dist2, axis=1)
+                    dmin = _np.sqrt(dist2[_np.arange(len(chunk)), nearest])
+                    mask = dmin < 0.05   # 境界ペア閾値
+                    if mask.any():
+                        diffs.append(body_pts[nearest[mask]] - chunk[mask])
+            if not diffs:
+                continue
+            gap = _np.median(_np.concatenate(diffs, axis=0), axis=0)
+            setattr(props, prop_name,
+                    tuple(float(c) for c in gap))  # update fires -> re-apply
+            filled += 1
+        self.report({'INFO'}, f"Auto-filled {filled} face offset(s)")
         return {'FINISHED'}
 
 
@@ -3890,6 +3947,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.prop(props, "face_offset_eye")
         box.prop(props, "face_offset_mouth")
         box.prop(props, "face_offset_brow")
+        box.operator("headshrink.auto_face_offsets", icon='SNAP_FACE')
 
         # ---- Step 5: mod 生成 (出力) ----
         box = layout.box()
@@ -3917,6 +3975,7 @@ classes = (
     NHS_OT_PreviewSetup,
     NHS_OT_PreviewApply,
     NHS_OT_RepositionFaces,
+    NHS_OT_AutoFaceOffsets,
     NHS_OT_PreviewReset,
     NHS_OT_SaveFaceOffsets,
     NHS_OT_SaveDefaultConfig,

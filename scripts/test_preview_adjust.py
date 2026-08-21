@@ -2119,6 +2119,56 @@ class FaceOffsetApplyTest(unittest.TestCase):
                          [(0.5, 0.5, 0.5)])
 
 
+class AutoFaceOffsetsTest(unittest.TestCase):
+    """NHS_OT_AutoFaceOffsets: 縮小後の顔-BODY ギャップを face_offset_* に書込。"""
+
+    def _run(self, body_verts, role, role_verts, body_loc=(0.0, 0.0, 0.0),
+             role_loc=(0.0, 0.0, 0.0)):
+        body = types.SimpleNamespace(
+            type='MESH', data=_FakeMesh(body_verts), location=body_loc,
+            get=lambda key, default=None: default)
+        face = types.SimpleNamespace(
+            type='MESH', data=_FakeMesh(role_verts), location=role_loc,
+            get=lambda key, default=None: {
+                'hs_role': role,
+            }.get(key, default))
+        hs.bpy.context.mode = 'OBJECT'
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: (types.SimpleNamespace(objects=[body, face])
+                              if name == 'HS_Preview' else None))
+        props = types.SimpleNamespace(
+            face_offset_eye=(0.0, 0.0, 0.0),
+            face_offset_mouth=(0.0, 0.0, 0.0),
+            face_offset_brow=(0.0, 0.0, 0.0))
+        context = types.SimpleNamespace(
+            scene=types.SimpleNamespace(headshrink_props=props))
+        reports = []
+        op = types.SimpleNamespace(
+            report=lambda level, msg: reports.append((set(level), msg)))
+        result = hs.NHS_OT_AutoFaceOffsets.execute(op, context)
+        return result, props, reports
+
+    def test_gap_written_to_prop(self):
+        # body 表面頂点 (0,2,0); eyes 頂点が y 方向 0.04 手前
+        # -> ギャップ (0, 0.04, 0) が face_offset_eye に書かれる
+        result, props, _ = self._run(
+            [(0.0, 2.0, 0.0), (1.0, 2.0, 1.0)], 'EYES', [(0.0, 1.96, 0.0)])
+        self.assertEqual(result, {'FINISHED'})
+        self.assertAlmostEqual(props.face_offset_eye[0], 0.0, places=6)
+        self.assertAlmostEqual(props.face_offset_eye[1], 0.04, places=6)
+        self.assertAlmostEqual(props.face_offset_eye[2], 0.0, places=6)
+        # 他ロールは触らない
+        self.assertEqual(props.face_offset_mouth, (0.0, 0.0, 0.0))
+        self.assertEqual(props.face_offset_brow, (0.0, 0.0, 0.0))
+
+    def test_gap_beyond_threshold_ignored(self):
+        # 距離 0.06 >= 0.05 閾値 -> 書き込まれない (props は初期値のまま)
+        result, props, _ = self._run(
+            [(0.0, 2.0, 0.0)], 'MOUTH', [(0.0, 1.94, 0.0)])
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(props.face_offset_mouth, (0.0, 0.0, 0.0))
+
+
 class FaceOriginSaveTest(unittest.TestCase):
     """_preview_setup_impl: 顔メッシュ (main 以外) に hs_face_origin を保存。"""
 
