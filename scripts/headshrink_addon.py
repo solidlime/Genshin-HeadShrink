@@ -415,6 +415,9 @@ def scan_dump_dir(dump_dir, position_vs=DEFAULT_POSITION_VS):
     except Exception:
         drawn_vb0 = set()
     _dump_cache['drawn_vb0'] = drawn_vb0
+    # フィルタ前の pre-skin セットを保存 (IB分割キャラの Position 置換用。
+    # drawn filter は BodyGate 用に残す)
+    _dump_cache['pre_skin_vb'] = position_vb
     if drawn_vb0:
         # keep only drawn hashes; fallback to original when filter empties (log incomplete)
         filtered = {h: info for h, info in position_vb.items() if h.lower()[:8] in drawn_vb0}
@@ -785,7 +788,7 @@ def build_position_buf(dump_bytes, game_verts, stride=DUMP_STRIDE):
     return bytes(out)
 
 
-def find_position_vb(dump_cache, vb_hash, vert_count):
+def find_position_vb(dump_cache, vb_hash, vert_count, drawn_filter=True):
     """Pre-skin position buffer matching a draw vb0 (by vertex count).
 
     The skinning pass renders non-indexed: its vb0 (position_vb) has the
@@ -799,10 +802,16 @@ def find_position_vb(dump_cache, vb_hash, vert_count):
     bbdaf598 (SO-only) is thus excluded in favour of e36be83b. Falls back to
     unfiltered when the filter would eliminate all candidates (log missing or
     incomplete).
+
+    drawn_filter=False: pre-skin (SO-only) hash も対象にする (IB分割キャラの
+    Position 置換用。drawn filter は BodyGate 用に残す)。scan_dump_dir が
+    保存した _dump_cache['pre_skin_vb'] (フィルタ前) を優先する。
     """
     position_vb = (dump_cache or {}).get('position_vb') or {}
+    if not drawn_filter:
+        position_vb = (dump_cache or {}).get('pre_skin_vb') or position_vb
     drawn = (dump_cache or {}).get('drawn_vb0')
-    if drawn:
+    if drawn_filter and drawn:
         filtered = {h: info for h, info in position_vb.items() if h.lower()[:8] in drawn}
         # fallback to full set when filter empties (log missing hash)
         if filtered:
@@ -950,7 +959,9 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
             pos_resource = n
             parts += [
                 f"[TextureOverride{pos_override}]",
-                f"hash = {u['vb_hash']}",
+                # IB分割キャラは pre-skin (SO) hash を置換 (drawn hash だと
+                # モデルローカル座標で上書きしてアニメ停止+体消滅する)
+                f"hash = {u.get('position_hash') or u['vb_hash']}",
                 f"vb0 = Resource{pos_resource}Position",
                 "$is = 1",
                 "",
@@ -3435,6 +3446,7 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 dump_hash = None
                 dump_path = None
                 pv_verts = None
+                position_hash = None
                 if is_fake:
                     # 正規の position_vb (例 28247) を使う
                     real = None
@@ -3453,6 +3465,8 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                     position_vb = real
                     dump_hash = real['vb_hash']
                     dump_path = real['path']
+                    # 偽Bodyは正規 position_vb (pre-skin) を既に使っている
+                    position_hash = dump_hash
                     # 偽メッシュは 220k 等で大きいため正規カウントでスライス
                     all_pv = [display_to_position_vb(tuple(v.co)) for v in mesh.vertices]
                     rv = real['vert_count']
@@ -3520,6 +3534,16 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                                         break
                         if alt:
                             dump_hash = alt
+                    # IB分割キャラ: Position 置換 hash は pre-skin (SO) バッファ。
+                    # drawn hash (post-skin) を置換するとモデルローカル座標で
+                    # 上書きしてアニメ停止+体消滅する (実証済み)。BodyGate は
+                    # drawn のまま維持するため units には position_hash を別持つ。
+                    position_hash = dump_hash
+                    if _has_ib_split(_dump_cache.get('ib_splits') or {}):
+                        pv = find_position_vb(
+                            _dump_cache, vb0, vert_count, drawn_filter=False)
+                        if pv:
+                            position_hash = pv['vb_hash']
                     pv_verts = [display_to_position_vb(tuple(v.co))
                                 for v in mesh.vertices]
                 # Bennett-mimic: overwrite only the position float3 of
@@ -3590,10 +3614,12 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                         except Exception:
                             pass
                     units.append({'name': name, 'vb_hash': dump_hash,
+                                  'position_hash': position_hash,
                                   'vert_count': vert_count, 'role': 'BODY',
                                   'ib': ib_hash, 'ib_splits': ib_splits})
                 else:
                     units.append({'name': name, 'vb_hash': dump_hash,
+                                  'position_hash': position_hash,
                                   'vert_count': vert_count, 'role': 'BODY'})
                 primary_for_key[('BODY', vert_count)] = name
                 continue

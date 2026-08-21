@@ -626,6 +626,32 @@ class BuildDiffIniModeTest(unittest.TestCase):
         self.assertNotIn('handling = skip', ini)
         self.assertNotIn('drawindexed = auto', ini)
 
+    def test_ib_split_position_hash_used_for_position_override(self):
+        # IB分割キャラ: Position override は pre-skin hash (position_hash)、
+        # per-part BodyGate は ib_hash のまま
+        ini = hs.build_diff_ini('Mizuki', [
+            {'name': 'MizukiBody', 'vb_hash': 'e36be83b',
+             'position_hash': 'bbdaf598', 'vert_count': 15965,
+             'role': 'BODY', 'ib': 'ec1ed3c9',
+             'ib_splits': [(0, 100), (44274, 200), (85404, 300)]},
+        ])
+        self.assertIn('[TextureOverrideMizukiPosition]', ini)
+        self.assertIn('hash = bbdaf598', ini)
+        self.assertIn('vb0 = ResourceMizukiBodyPosition', ini)
+        # per-part BodyGate は ib hash のまま
+        self.assertIn('[TextureOverrideMizukiBody]', ini)
+        self.assertIn('hash = ec1ed3c9', ini)
+        self.assertIn('match_first_index = 44274', ini)
+
+    def test_no_position_hash_keeps_vb_hash(self):
+        # position_hash 無し (Noelle系) は従来通り vb_hash を使う
+        ini = hs.build_diff_ini('Noelle', [
+            {'name': 'NoelleBody', 'vb_hash': 'def7af36', 'vert_count': 15965,
+             'role': 'BODY'},
+        ])
+        self.assertIn('[TextureOverrideNoelleBody]', ini)
+        self.assertIn('hash = def7af36', ini)
+
 
 class PositionBufTest(unittest.TestCase):
     """Position.buf helper: dump vb0 bytes with position float3 replaced,
@@ -1515,6 +1541,40 @@ class FindPositionVbTest(unittest.TestCase):
 
     def test_missing_position_vb_key_returns_none(self):
         self.assertIsNone(hs.find_position_vb({'pairs': []}, 'def7af36', 15965))
+
+    def test_drawn_filter_false_uses_pre_skin_vb(self):
+        # IB分割キャラ: drawn filter で除外される SO-only hash (bbdaf598) も
+        # drawn_filter=False なら pre_skin_vb (フィルタ前) から返る
+        cache = {
+            'position_vb': {'e36be83b': {'path': 'drawn.buf', 'vert_count': 15965,
+                                         'vs': '653c63ba4a73ca8b'}},
+            'pre_skin_vb': {'bbdaf598': {'path': 'so.buf', 'vert_count': 15965,
+                                         'vs': '653c63ba4a73ca8b'}},
+            'drawn_vb0': {'e36be83b'},
+        }
+        out = hs.find_position_vb(cache, 'def7af36', 15965, drawn_filter=False)
+        self.assertEqual(out['vb_hash'], 'bbdaf598')
+        self.assertEqual(out['path'], 'so.buf')
+
+    def test_drawn_filter_default_excludes_so_only(self):
+        # 既定 (drawn_filter=True) は従来通り drawn hash を優先
+        cache = {
+            'position_vb': {'bbdaf598': {'path': 'so.buf', 'vert_count': 15965,
+                                         'vs': '653c63ba4a73ca8b'},
+                            'e36be83b': {'path': 'drawn.buf', 'vert_count': 15965,
+                                         'vs': '653c63ba4a73ca8b'}},
+            'pre_skin_vb': {'bbdaf598': {'path': 'so.buf', 'vert_count': 15965,
+                                         'vs': '653c63ba4a73ca8b'}},
+            'drawn_vb0': {'e36be83b'},
+        }
+        out = hs.find_position_vb(cache, 'def7af36', 15965)
+        self.assertEqual(out['vb_hash'], 'e36be83b')
+
+    def test_drawn_filter_false_falls_back_to_position_vb(self):
+        # pre_skin_vb が無い旧キャッシュでも position_vb にフォールバック
+        out = hs.find_position_vb(self.CACHE, 'def7af36', 15965,
+                                  drawn_filter=False)
+        self.assertEqual(out['vb_hash'], 'd1384d15')
 
 
 class ScanDumpDirSubdirTest(unittest.TestCase):
