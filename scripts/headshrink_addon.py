@@ -1815,7 +1815,7 @@ def _save_prefs(self, context):
 
 
 def _dump_dir_changed(self, context):
-    """dump_dir 変更時: Character 自動反映 + 自動セットアップ予約 + userpref 自動保存。"""
+    """dump_dir 変更時: Character 自動反映 + units リセット + 自動セットアップ予約 + userpref 自動保存。"""
     try:
         new_dir = bpy.path.abspath(self.dump_dir) if getattr(self, "dump_dir", None) else ""
         if new_dir and os.path.isdir(new_dir):
@@ -1827,6 +1827,11 @@ def _dump_dir_changed(self, context):
                 props = context.scene.headshrink_props
                 if base != props.char_name:
                     props.char_name = base
+                # ダンプディレクトリ変更 = キャラ切替とみなし、前キャラの units
+                # (vb0 ハッシュ登録) をメモリ上からクリアする。config.json の
+                # 保存データは触らない。
+                props.units_list.clear()
+                props.units_list_index = 0
     except Exception:
         pass
     _dump_dir_update(self, context)
