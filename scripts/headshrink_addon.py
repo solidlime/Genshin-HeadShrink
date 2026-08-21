@@ -3026,6 +3026,20 @@ def _preview_setup_impl(self, context):
                 if o is main:
                     continue
                 o.location = common_loc
+            # 境界ギャップ閉じ (pv空間): common_loc 後の顔表示頂点と BODY 表面の
+            # 最近傍ペアから y/z ギャップを収束させる (x は対称のため 0 固定)。
+            # 保存済み offsets (saved) の再適用より前に置き、ユーザーの G 調整が
+            # 常に優先される順序を維持する。
+            face_objs_pv = [o for o in preview_objs if o is not main]
+            if face_objs_pv and np is not None:
+                matched = _match_face_offsets(
+                    main, face_objs_pv,
+                    {o.get('hs_vb0_hash', ''): tuple(o.location)
+                     for o in face_objs_pv})
+                for o in face_objs_pv:
+                    loc = matched.get(o.get('hs_vb0_hash', ''))
+                    if loc is not None:
+                        o.location = (0.0, loc[1], loc[2])
         else:
             # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
             # になるため、正規position_vbの頭部中心を優先して使う (generic)。

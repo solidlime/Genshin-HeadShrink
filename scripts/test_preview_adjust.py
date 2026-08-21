@@ -2346,6 +2346,110 @@ class AutoSetupCommonLocTest(unittest.TestCase):
             self.assertEqual(tuple(copied[name].location), (0.0, 0.0, -1.0))
 
 
+class PvGapClosingTest(unittest.TestCase):
+    """_preview_setup_impl (pv): common_loc 適用後の境界ギャップ閉じ。
+
+    _match_face_offsets が顔表示頂点と BODY 表面の最近傍ペアから y/z ギャップ
+    を収束させ、x は対称のため 0 固定のままになることを検証する。
+    """
+
+    def _run(self, body_verts, face_verts, face_loc):
+        class _Mesh:
+            def __init__(self, verts):
+                self.vertices = [types.SimpleNamespace(co=list(c))
+                                 for c in verts]
+                self._attrs = {}
+            def copy(self):
+                return _Mesh([tuple(v.co) for v in self.vertices])
+            def update(self):
+                pass
+            @property
+            def attributes(self):
+                return self
+            def new(self, name, type, domain):
+                self._attrs[name] = types.SimpleNamespace(
+                    data=types.SimpleNamespace(foreach_set=lambda *a: None))
+                return self._attrs[name]
+
+        class _Obj:
+            def __init__(self, name, role, verts):
+                self.name = name
+                self.type = 'MESH'
+                self.location = [0.0, 0.0, 0.0]
+                self.rotation_euler = [0.0, 0.0, 0.0]
+                self.scale = [1.0, 1.0, 1.0]
+                self.data = _Mesh(verts)
+                self._props = {'hs_vb0_hash': name, 'hs_role': role}
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+            def __getitem__(self, key):
+                return self._props[key]
+            def __setitem__(self, key, value):
+                self._props[key] = value
+
+        class _ObjList(list):
+            def link(self, obj):
+                self.append(obj)
+
+        body = _Obj('Dump_body', 'BODY', body_verts)
+        body._props['hs_position_vb'] = 'pos'  # use_pv_placement を有効化
+        face = _Obj('Dump_eyes', 'EYES', face_verts)
+        src = types.SimpleNamespace(objects=[body, face])
+        coll = types.SimpleNamespace(objects=_ObjList())
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: src if name == 'HeadShrink_Dump' else None,
+            new=lambda name: coll)
+
+        def _new_obj(name, mesh):
+            o = _Obj(name, 'OTHER', [tuple(v.co) for v in mesh.vertices])
+            if name == 'Dump_body':
+                o._props['hs_position_vb'] = 'pos'
+            return o
+
+        hs.bpy.data.objects = types.SimpleNamespace(new=_new_obj)
+        context = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                collection=types.SimpleNamespace(
+                    children=types.SimpleNamespace(link=lambda c: None)),
+                headshrink_props=types.SimpleNamespace(
+                    shrink_center=(0.0, 0.0, 0.0),
+                    shrink_half=(1.0, 1.0, 1.0),
+                    char_name='Noelle')),
+            screen=None)
+        op = types.SimpleNamespace(report=lambda level, msg: None)
+        saved = (hs.load_face_offsets, hs._auto_face_shrink_center,
+                 hs._create_shrink_box, hs._load_body_draw_verts,
+                 hs._face_draw_to_body_space)
+        hs.load_face_offsets = lambda *a, **k: {}
+        hs._auto_face_shrink_center = lambda *a, **k: None
+        hs._create_shrink_box = lambda *a, **k: None
+        hs._load_body_draw_verts = lambda main: [(0.0, 0.0, 0.0)]
+        hs._face_draw_to_body_space = lambda o, bd, bp: face_loc
+        try:
+            result = hs._preview_setup_impl(op, context)
+        finally:
+            (hs.load_face_offsets, hs._auto_face_shrink_center,
+             hs._create_shrink_box, hs._load_body_draw_verts,
+             hs._face_draw_to_body_space) = saved
+        copied = {o.name: o for o in coll.objects}
+        return result, copied
+
+    def test_refinement_pulls_face_to_body_keeps_x_zero(self):
+        # BODY 頂点 (0,1,0) に対し顔頂点が +y に 0.01 離れて配置される
+        # (common_loc 適用後)。境界ギャップ閉じで y が収束し x は 0 固定。
+        body_verts = [(0.0, 1.0, 0.0), (0.0, -1.0, 0.0),
+                      (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
+                      (0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]
+        face_verts = [(0.0, 1.01, 0.0)]
+        result, copied = self._run(body_verts, face_verts,
+                                   (0.0, 0.0, 0.0))
+        self.assertEqual(result, {'FINISHED'})
+        loc = tuple(copied['Dump_eyes'].location)
+        self.assertEqual(loc[0], 0.0)          # x は 0 固定
+        self.assertAlmostEqual(loc[1], -0.01)  # y ギャップ 0.01 を閉じる
+        self.assertEqual(loc[2], 0.0)
+
+
 class BoxCenterPivotTest(unittest.TestCase):
     """v2.0.0: BODY 縮小の pivot は box 中央固定 (shrink_origin 非依存)。"""
 
