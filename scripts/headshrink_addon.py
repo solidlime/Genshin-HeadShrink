@@ -130,6 +130,8 @@ def _scan_drawn_vb0(dump_dir):
                 continue
             for k in range(i-1, max(-1, i-40), -1):
                 if 'IASetVertexBuffers' in lines[k]:
+                    for hm in hr.finditer(lines[k]):
+                        drawn.add(hm.group(1).lower()[:8])
                     for t in range(k+1, i):
                         if 'resource=' in lines[t] or 'view=' in lines[t]:
                             for hm in hr.finditer(lines[t]):
@@ -888,10 +890,10 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
             # IB match_first_index split (e.g. Lan Yan 1066a76c: Head 0 / Body 41385 / Dress 85527)
             # 補助: u に ib / ib_splits があれば Head/Body/Dress の 3分割を出力
             if has_split:
-                splits_sorted = sorted(splits)
+                splits_sorted = sorted(splits)[:3]
                 part_names = ['Head', 'Body', 'Dress']
                 for idx, (first, cnt) in enumerate(splits_sorted):
-                    part = part_names[idx] if idx < len(part_names) else f'Part{idx}'
+                    part = part_names[idx]
                     res_name = f"{char}{part}"
                     # 同一 char で複数 BODY が無い想定、重複は呼び出し側でユニーク化済み
                     parts += [
@@ -1054,8 +1056,8 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
                     norm.append((int(e[0]), int(e[1]) if len(e) > 1 else 0))
                 else:
                     norm.append((int(e), 0))
-            for idx, (first, _c) in enumerate(sorted(norm)):
-                part = ['Head', 'Body', 'Dress'][idx] if idx < 3 else f'Part{idx}'
+            for idx, (first, _c) in enumerate(sorted(norm)[:3]):
+                part = ['Head', 'Body', 'Dress'][idx]
                 res = f"{char}{part}"
                 parts += [f"[TextureOverride{res}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{res}IB", "", f"[Resource{res}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {res}.ib", ""]
     return "\n".join(parts)
@@ -3425,8 +3427,8 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                         try:
                             with open(ib_path, 'rb') as f:
                                 ib_data = f.read()
-                            for idx2, (first2, cnt2) in enumerate(sorted(ib_splits)):
-                                part2 = ['Head', 'Body', 'Dress'][idx2] if idx2 < 3 else f'Part{idx2}'
+                            for idx2, (first2, cnt2) in enumerate(sorted(ib_splits)[:3]):
+                                part2 = ['Head', 'Body', 'Dress'][idx2]
                                 res_name2 = f"{char_name}{part2}"
                                 s = first2 * DUMP_INDEX_BYTES
                                 e = (first2 + cnt2) * DUMP_INDEX_BYTES
