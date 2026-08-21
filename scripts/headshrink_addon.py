@@ -2999,41 +2999,94 @@ def _preview_setup_impl(self, context):
         # 読込失敗時は従来の head_center 配置にフォールバック。
         # 偽Bodyは position_vb を持たず x,y=0 のままなので PV配置はスキップ
         use_pv_placement = bool(main.get('hs_position_vb')) and not bool(main.get('hs_is_fake_body'))
-        body_draw_verts = None
-        body_pos_verts = None
-        if use_pv_placement:
-            body_draw_verts = _load_body_draw_verts(main)
-            if body_draw_verts:
-                body_pos_verts = [tuple(v.co) for v in main.data.vertices]
-            else:
-                use_pv_placement = False
+        # 配置アンカー「頭部領域中心」: 顔メッシュのローカル座標が体の腰付近と
+        # 重なる場合、_face_draw_to_body_space の最近傍はお腹の頂点に吸着して
+        # しまう。BODY 頭部 bbox (z 上位35%) 中心へ各顔の表示 bbox 中心を
+        # 合わせて配置する (x は左右対称のため 0 固定)。頭部 bbox が取れない
+        # 場合のみ従来の draw→body 最近傍配置にフォールバックする。
+        head = _body_head_bbox(preview_objs) if use_pv_placement else None
         locs = []
-        if use_pv_placement:
-            # 顔メッシュを draw_vb → position_vb 空間に近似配置 (loc のみ変更、
-            # v.co は draw_vb 空間のまま → export は loc と独立)。
+        if use_pv_placement and head is not None:
+            head_center = head[0]
             for o in preview_objs:
                 if o is main:
                     continue
-                loc = _face_draw_to_body_space(o, body_draw_verts,
-                                               body_pos_verts)
-                if loc is not None:
-                    locs.append(loc)
-        if use_pv_placement and locs:
-            # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
-            # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
-            # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
-            # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
-            common_loc = (0.0,
-                          0.0,
-                          _median([loc[2] for loc in locs]))
-            for o in preview_objs:
-                if o is main:
+                face_c = _face_mesh_center(o)
+                if face_c is None:
                     continue
-                o.location = common_loc
-            # 境界ギャップ閉じ (pv空間): common_loc 後の顔表示頂点と BODY 表面の
-            # 最近傍ペアから y/z ギャップを収束させる (x は対称のため 0 固定)。
-            # 保存済み offsets (saved) の再適用より前に置き、ユーザーの G 調整が
-            # 常に優先される順序を維持する。
+                o.location = (0.0, head_center[1] - face_c[1],
+                              head_center[2] - face_c[2])
+        else:
+            body_draw_verts = None
+            body_pos_verts = None
+            if use_pv_placement:
+                body_draw_verts = _load_body_draw_verts(main)
+                if body_draw_verts:
+                    body_pos_verts = [tuple(v.co) for v in main.data.vertices]
+                else:
+                    use_pv_placement = False
+            if use_pv_placement:
+                # 顔メッシュを draw_vb → position_vb 空間に近似配置 (loc のみ変更、
+                # v.co は draw_vb 空間のまま → export は loc と独立)。
+                for o in preview_objs:
+                    if o is main:
+                        continue
+                    loc = _face_draw_to_body_space(o, body_draw_verts,
+                                                   body_pos_verts)
+                    if loc is not None:
+                        locs.append(loc)
+            if use_pv_placement and locs:
+                # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
+                # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
+                # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
+                # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
+                common_loc = (0.0,
+                              0.0,
+                              _median([loc[2] for loc in locs]))
+                for o in preview_objs:
+                    if o is main:
+                        continue
+                    o.location = common_loc
+            else:
+                # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
+                # になるため、正規position_vbの頭部中心を優先して使う (generic)。
+                if bool(main.get('hs_is_fake_body')):
+                    head_center = None
+                    try:
+                        real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
+                        if real and real.get('path') and os.path.exists(real['path']):
+                            with open(real['path'], 'rb') as _f:
+                                _d = _f.read()
+                            _n = len(_d) // DUMP_STRIDE
+                            _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
+                            head_center = head_center_from_verts(_verts)
+                    except Exception:
+                        head_center = None
+                    if head_center is None:
+                        head_center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
+                else:
+                    head_center = head_center_from_verts(
+                        [tuple(v.co) for v in main.data.vertices])
+                if head_center is not None:
+                    for o in preview_objs:
+                        if o is main:
+                            continue
+                        verts = [tuple(v.co) for v in o.data.vertices]
+                        if not verts:
+                            continue
+                        face_center = tuple(
+                            sum(p[i] for p in verts) / len(verts) for i in range(3))
+                        if use_pv_placement:
+                            # PVフォールバック: x,yは0固定 (対称性維持)
+                            o.location = (0.0, 0.0, head_center[2] - face_center[2])
+                        else:
+                            o.location = tuple(head_center[i] - face_center[i] for i in range(3))
+        # 境界ギャップ閉じ (pv配置後): head / common_loc 配置後の顔表示頂点と
+        # BODY 表面の最近傍ペアから y/z ギャップを収束させて表面にスナップする
+        # (x は対称のため 0 固定)。頭部に近づいたことで最近傍が顔領域の頂点に
+        # なり正しくスナップする。保存済み offsets (saved) の再適用より前に置き、
+        # ユーザーの G 調整が常に優先される順序を維持する。
+        if use_pv_placement and (head is not None or locs):
             face_objs_pv = [o for o in preview_objs if o is not main]
             if face_objs_pv and np is not None:
                 matched = _match_face_offsets(
@@ -3044,40 +3097,6 @@ def _preview_setup_impl(self, context):
                     loc = matched.get(o.get('hs_vb0_hash', ''))
                     if loc is not None:
                         o.location = (0.0, loc[1], loc[2])
-        else:
-            # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
-            # になるため、正規position_vbの頭部中心を優先して使う (generic)。
-            if bool(main.get('hs_is_fake_body')):
-                head_center = None
-                try:
-                    real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
-                    if real and real.get('path') and os.path.exists(real['path']):
-                        with open(real['path'], 'rb') as _f:
-                            _d = _f.read()
-                        _n = len(_d) // DUMP_STRIDE
-                        _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
-                        head_center = head_center_from_verts(_verts)
-                except Exception:
-                    head_center = None
-                if head_center is None:
-                    head_center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
-            else:
-                head_center = head_center_from_verts(
-                    [tuple(v.co) for v in main.data.vertices])
-            if head_center is not None:
-                for o in preview_objs:
-                    if o is main:
-                        continue
-                    verts = [tuple(v.co) for v in o.data.vertices]
-                    if not verts:
-                        continue
-                    face_center = tuple(
-                        sum(p[i] for p in verts) / len(verts) for i in range(3))
-                    if use_pv_placement:
-                        # PVフォールバック: x,yは0固定 (対称性維持)
-                        o.location = (0.0, 0.0, head_center[2] - face_center[2])
-                    else:
-                        o.location = tuple(head_center[i] - face_center[i] for i in range(3))
         # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
         # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
         for o in preview_objs:
