@@ -196,6 +196,79 @@ def _has_ib_split(ib_splits):
     return any(len(v) >= 2 for v in (ib_splits or {}).values())
 
 
+def _resolve_drawn_vb_hash(dump_cache, vb_hash, vert_count):
+    """Return drawn vb0 hash with same vert_count when vb_hash is SO-only.
+
+    Generic: when vb_hash not in drawn_vb0 (e.g. bbdaf598 SO-only) but a
+    drawn vb0 with identical vert_count exists (e.g. e36be83b), return the
+    drawn one. Uses dump_cache['drawn_vb0'] and scans dump_dir for size match.
+    No hard-coded hash.
+    """
+    drawn = (dump_cache or {}).get('drawn_vb0') or set()
+    if not drawn:
+        return vb_hash
+    if vb_hash and vb_hash.lower()[:8] in drawn:
+        return vb_hash
+    position_vb = (dump_cache or {}).get('position_vb') or {}
+    # Try position_vb entries that are drawn and match vert_count
+    for h, info in position_vb.items():
+        if h.lower()[:8] in drawn and info.get('vert_count') == vert_count:
+            return h
+    # Fallback: scan dump_dir via cache-bypass (scan for drawn .buf with same size)
+    # Caller already has scan_dir logic for body_hash; keep minimal here and let
+    # caller handle filesystem scan if needed. Return original when no match.
+    return vb_hash
+
+
+def _find_paired_ibs(dump_dir, vb_hash):
+    """Find IB hashes that share same frame+vs+ps with vb_hash (Body pairing).
+
+    Generic: scans dump_dir filenames for vb0=vb_hash and ib=* sharing the
+    same prefix (frame) and same vs/ps hashes. Returns set of paired ib hashes.
+    Used to limit IB split output to the Body's IB only (e.g. ec1ed3c9).
+    """
+    if not dump_dir or not os.path.isdir(dump_dir):
+        return set()
+    target = vb_hash.lower()[:8]
+    # Map (frame_key, vs, ps) -> {vb_hashes}, {ib_hashes}
+    vb_groups = {}
+    ib_groups = {}
+    vs_re = re.compile(r'-vs=([0-9a-f]{8})')
+    ps_re = re.compile(r'-ps=([0-9a-f]{8})')
+    for root, _dirs, files in os.walk(dump_dir):
+        if os.path.basename(root) == 'deduped':
+            continue
+        rel = os.path.relpath(root, dump_dir)
+        prefix = '' if rel == '.' else rel + os.sep
+        for fn in files:
+            low = fn.lower()
+            if not low.endswith('.buf'):
+                continue
+            m_vb = _DUMP_FRAME_RE.match(fn)
+            m_ib = _DUMP_IB_RE.match(fn)
+            if m_vb:
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                key = prefix + m_vb.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                vb_groups.setdefault(key, set()).add(m_vb.group(2).lower()[:8])
+            elif m_ib:
+                vs_m = vs_re.search(low)
+                ps_m = ps_re.search(low)
+                if not (vs_m and ps_m):
+                    continue
+                key = prefix + m_ib.group(1) + f"-vs={vs_m.group(1)}-ps={ps_m.group(1)}"
+                ib_groups.setdefault(key, set()).add(m_ib.group(2).lower()[:8])
+    paired = set()
+    for key, vb_set in vb_groups.items():
+        if target in vb_set:
+            ibs = ib_groups.get(key)
+            if ibs:
+                paired.update(ibs)
+    return paired
+
+
 def _find_largest_vb0(all_files):
     """Largest vb0 .buf among all_files by vert_count (fake Body candidate)."""
     best = None
@@ -1059,7 +1132,9 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
             for idx, (first, _c) in enumerate(sorted(norm)[:3]):
                 part = ['Head', 'Body', 'Dress'][idx]
                 res = f"{char}{part}"
-                parts += [f"[TextureOverride{res}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{res}IB", "", f"[Resource{res}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {res}.ib", ""]
+                # 重複防止: 同一charで複数IBが来てもセクション名が衝突しないようhashサフィックス
+                uniq = f"{res}_{key}"
+                parts += [f"[TextureOverride{uniq}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{uniq}IB", "", f"[Resource{uniq}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {uniq}.ib", ""]
     return "\n".join(parts)
 
 
@@ -3384,6 +3459,51 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                         return {'CANCELLED'}
                     dump_hash = position_vb['vb_hash']
                     dump_path = position_vb['path']
+                    # SO-only hash (bbdaf598) -> Draw hash (e36be83b) 統一: log.txt Draw 出現で汎用的に
+                    drawn_set = _dump_cache.get('drawn_vb0') or set()
+                    if dump_hash and drawn_set and dump_hash.lower()[:8] not in drawn_set:
+                        # 同 vert_count の Draw可視 hash を dump_dir から探索
+                        body_vc = position_vb.get('vert_count')
+                        alt = None
+                        # まず position_vb 内の drawn エントリ
+                        for h2, info2 in (_dump_cache.get('position_vb') or {}).items():
+                            if h2.lower()[:8] in drawn_set and info2.get('vert_count') == body_vc and h2.lower()[:8] != dump_hash.lower()[:8]:
+                                alt = h2
+                                break
+                        if not alt:
+                            scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+                            try:
+                                scan_dir = os.path.abspath(scan_dir) if scan_dir else ''
+                            except Exception:
+                                scan_dir = ''
+                            if scan_dir and os.path.isdir(scan_dir):
+                                for r2, _, fs2 in os.walk(scan_dir):
+                                    for fn2 in fs2:
+                                        if not fn2.lower().endswith('.buf'):
+                                            continue
+                                        m2 = _DUMP_FRAME_RE.match(fn2)
+                                        if m2:
+                                            hh = m2.group(2).lower()[:8]
+                                        elif os.path.basename(r2) == 'deduped':
+                                            hh = os.path.splitext(fn2)[0].lower()
+                                            if len(hh) != 8:
+                                                continue
+                                        else:
+                                            continue
+                                        if hh not in drawn_set:
+                                            continue
+                                        p2 = os.path.join(r2, fn2)
+                                        try:
+                                            vc2 = os.path.getsize(p2) // DUMP_STRIDE
+                                        except OSError:
+                                            continue
+                                        if vc2 == body_vc:
+                                            alt = hh
+                                            break
+                                    if alt:
+                                        break
+                        if alt:
+                            dump_hash = alt
                     pv_verts = [display_to_position_vb(tuple(v.co))
                                 for v in mesh.vertices]
                 # Bennett-mimic: overwrite only the position float3 of
@@ -3396,16 +3516,24 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 with open(os.path.join(output_dir, f"{name}Position.buf"),
                           'wb') as f:
                     f.write(pos_data)
-                # IB match_first_index split (Lan Yan) — 検出した ib_splits を unit に付与
+                # IB match_first_index split — Draw可視 Body と同フレーム・同vs/psでペアになる IB のみに限定 (泛用)
                 ib_hash = None
                 ib_splits = None
                 try:
                     splits_map = _dump_cache.get('ib_splits') or {}
-                    if splits_map:
-                        # 最適な IB (分割数>=2で総index最大) を Body に紐付け
+                    if splits_map and dump_hash:
+                        # Body の Draw可視 hash とペアになる IB のみに絞る
+                        scan_dir2 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+                        try:
+                            scan_dir2 = os.path.abspath(scan_dir2) if scan_dir2 else ''
+                        except Exception:
+                            scan_dir2 = ''
+                        paired = _find_paired_ibs(scan_dir2, dump_hash) if scan_dir2 else set()
+                        # paired が空なら fallback で絞らず(過去キャラ互換)、あるなら絞る
+                        cand_map = {k: v for k, v in splits_map.items() if k in paired} if paired else splits_map
                         best = None
                         best_total = -1
-                        for kh, sp in splits_map.items():
+                        for kh, sp in cand_map.items():
                             if len(sp) >= 2:
                                 tot = sum(c for _, c in sp)
                                 if tot > best_total:
@@ -3543,8 +3671,26 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         if not body_hash:
             face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
             face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
-        # IB split overrides (Head/Body/Dress) via match_first_index: pass external ib_splits to build_diff_ini
-        ib_splits_for_ini = _dump_cache.get('ib_splits') if _has_ib_split(_dump_cache.get('ib_splits') or {}) else None
+        # IB split overrides — Draw可視 Body とペアになる IB のみに限定 (泛用、他小物は出さない)
+        ib_splits_for_ini = None
+        raw_splits = _dump_cache.get('ib_splits') or {}
+        if _has_ib_split(raw_splits) and body_hash:
+            scan_dir3 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+            try:
+                scan_dir3 = os.path.abspath(scan_dir3) if scan_dir3 else ''
+            except Exception:
+                scan_dir3 = ''
+            paired3 = _find_paired_ibs(scan_dir3, body_hash) if scan_dir3 else set()
+            if paired3:
+                filtered = {k: v for k, v in raw_splits.items() if k in paired3}
+                if filtered and any(len(v) >= 2 for v in filtered.values()):
+                    ib_splits_for_ini = filtered
+            else:
+                # fallback: when pairing fails (old dump without vs/ps), pass nothing to avoid 12重複爆殖
+                ib_splits_for_ini = None
+        elif _has_ib_split(raw_splits) and not body_hash:
+            # Body無しキャラでは外部IBは出さない(重複防止)
+            ib_splits_for_ini = None
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
