@@ -71,7 +71,7 @@ class _Obj:
         return self._props[key]
 
 
-def _run_export(objs, scale=0.65):
+def _run_export(objs, scale=0.65, face_offsets=None):
     """ExportDiff.execute を Fake bpy で実行し、出力ディレクトリを返す。"""
     tmp = tempfile.mkdtemp()
     coll = types.SimpleNamespace(objects=objs)
@@ -87,11 +87,14 @@ def _run_export(objs, scale=0.65):
     hs.auto_extra_hashes = lambda *a, **k: {}
     hs._dump_cache = {}
     try:
+        props = types.SimpleNamespace(
+            char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS,
+            shrink_scale=scale, shrink_scale_mode='UNIFORM',
+            shrink_scale_xyz=(0.95, 0.95, 0.95))
+        for k, v in (face_offsets or {}).items():
+            setattr(props, k, v)
         context = types.SimpleNamespace(
-            scene=types.SimpleNamespace(headshrink_props=types.SimpleNamespace(
-                char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS,
-                shrink_scale=scale, shrink_scale_mode='UNIFORM',
-                shrink_scale_xyz=(0.95, 0.95, 0.95))),
+            scene=types.SimpleNamespace(headshrink_props=props),
             preferences=types.SimpleNamespace(addons={
                 hs.__name__: types.SimpleNamespace(
                     preferences=types.SimpleNamespace(output_dir=tmp))}))
@@ -162,6 +165,23 @@ class FaceKeyNormalizationTest(unittest.TestCase):
         key = _positions(_read(os.path.join(out, 'NoelleBrowKey.buf')), 5)
         base_p = _positions(_read(os.path.join(out, 'NoelleBrowBase.buf')), 5)
         self.assertEqual(key, base_p)
+
+    def test_key_offset_translation(self):
+        # T018: face_offset (display 空間) は game 空間へ変換されて Key に
+        # 加算される。scale=1.0 + offset なら Key = Base + display_to_game(off)
+        base = _base_verts(6)
+        off = (1.5, -2.0, 3.0)
+        out = _run_export(
+            [_Obj('Mouth1', '6192fe1c', 'MOUTH',
+                  _Mesh(base, [(x + 4.0, y, z) for x, y, z in base]))],
+            scale=1.0,
+            face_offsets={'face_offset_mouth': off})
+        key = _positions(_read(os.path.join(out, 'NoelleMouthKey.buf')), 6)
+        off_game = hs.display_to_game(off)
+        for got, b in zip(key, base):
+            bg = hs.display_to_game(b)
+            for i in range(3):
+                self.assertAlmostEqual(got[i], bg[i] + off_game[i], places=5)
 
     def test_ini_ib_sections_emit_is_gate(self):
         # T015(b): IB ハッシュセクション (handling=skip) は毎ドロー発火の

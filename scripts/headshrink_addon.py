@@ -3842,21 +3842,23 @@ _FACE_UI_ROLES = ('EYES', 'MOUTH', 'BROW')
 
 
 def _face_key_verts(base_verts, shrink_scale, shrink_scale_mode,
-                    shrink_scale_xyz):
-    """顔 UI ユニットの Key 頂点列 = f(Base, scale) の純スケール。
+                    shrink_scale_xyz, offset=(0.0, 0.0, 0.0)):
+    """顔 UI ユニットの Key 頂点列 = f(Base, scale, offset)。
 
-    Base 自身の bbox 中心を pivot とするスケールのみで、配置移動
-    (_face_draw_to_body_space 等による頭部位置への translation) を含まない。
-    同一 VB ハッシュは同体型キャラ間で共有され、per-char 移動は cross-char
-    連鎖で破綻するため。Key は scale に依存する — 共有整合の前提として
-    キャラ間で同じ scale を使うこと。
+    Base 自身の bbox 中心を pivot とする純スケール + offset 平行移動。
+    配置移動 (_face_draw_to_body_space 等による頭部位置への translation) は
+    含まない — 同一 VB ハッシュは同体型キャラ間で共有され、per-char 移動は
+    cross-char 連鎖で破綻するため。offset は T018 で再導入した per-char
+    微調整 (face_offset_* プロップ、呼び出し側で game 空間へ変換済みのこと)。
+    Key は scale/offset に依存する — 共有整合の前提としてキャラ間で同じ
+    値を使うこと。
     """
     s = (tuple(shrink_scale_xyz) if shrink_scale_mode == 'PER_AXIS'
          else (shrink_scale,) * 3)
     mins = [min(v[i] for v in base_verts) for i in range(3)]
     maxs = [max(v[i] for v in base_verts) for i in range(3)]
     c = [(mins[i] + maxs[i]) / 2.0 for i in range(3)]
-    return [tuple(c[i] + (b[i] - c[i]) * s[i] for i in range(3))
+    return [tuple(c[i] + (b[i] - c[i]) * s[i] + offset[i] for i in range(3))
             for b in base_verts]
 
 
@@ -3939,12 +3941,18 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                           for i in range(0, len(flat), 3)]
             base_data = replace_positions(bytes(vert_count * DUMP_STRIDE), base_verts, DUMP_STRIDE)
             if role in _FACE_UI_ROLES:
-                # T015: 共有顔ハッシュの Key は f(Base, scale) の純スケール
-                # (配置移動なし)。variant (extra_hash) は Base/Key を共有する
-                # ため自動的に同じ正規化が適用される。
+                # T015: 共有顔ハッシュの Key は f(Base, scale) の純スケール。
+                # T018: face_offset (display 空間プロップ) を game 空間へ
+                # 変換して Key に加算 (preview の _apply_face_offset と同じ
+                # 変位)。variant (extra_hash) は Base/Key を共有するため
+                # 自動的に同じ正規化が適用される。
+                off = _face_offset_for_role(props, role)
+                off_game = (display_to_game(tuple(off)) if off
+                            else (0.0, 0.0, 0.0))
                 key_verts = _face_key_verts(
                     base_verts, props.shrink_scale,
-                    props.shrink_scale_mode, tuple(props.shrink_scale_xyz))
+                    props.shrink_scale_mode, tuple(props.shrink_scale_xyz),
+                    off_game)
             else:
                 key = (role, vert_count)
                 if key not in delta_cache:
