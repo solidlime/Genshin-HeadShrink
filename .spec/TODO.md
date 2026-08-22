@@ -1,6 +1,10 @@
 # TODO - タスクリスト
 
 ## 優先度：高
+- [x] **T016: dump dir 再オープン時の unit リストリセット廃止** — 2026-08-23 完了 (commit a067166、pytest 272 passed / 1 skipped。詳細は SPEC「T016」節)
+  - [x] a: `_dump_dir_changed` の `units_list.clear()` を「キャラが実際に変わった時だけ」に限定 (同一キャラ再オープンでは保持)
+  - [x] b: register() の prefs 復元時に update 発火でリセットされないよう抑制 (`_restoring_prefs` フラグ + try/finally)
+  - [x] c: テスト追加 scripts/test_t016_dump_dir_reopen.py 4件 (同キャラ再オープンで保持 / キャラ変更でクリア / 復元フラグ抑制 / finally 復帰)
 - [x] **T014: 顔パーツ CopyDispatch HLSL の冪等化** — 2026-08-22 完了 (commit 594216f、#081 レビュー PASS。根因: 非冪等累算式 + 顔 VB ハッシュのキャラ間共有、詳細は SPEC「口つぶれ・チーム画面隙間の解析」)
   - [x] P1: HLSL 生成テンプレを冪等化 — cur≈key → return / cur≈base → key 代入 / どちらでもない → 何もしない (HS_EPS=1e-4)。テンプレ変更で全キャラに効く。**既存 mod は再エクスポートが必要**
   - [x] P2: オフラインテスト scripts/test_diff_hlsl_idempotent.py 5件 (単発/二重/三重適用=1回分、未一致状態 noop、テンプレ構造ガード)。pytest 262 passed / 1 skipped、golden NoelleHead.hlsl 意図的更新
