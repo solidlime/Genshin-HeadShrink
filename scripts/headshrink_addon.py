@@ -1374,8 +1374,8 @@ def _save_config_data(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def save_global_dirs(dump_dir=None, output_dir=None):
-    """Persist dump_dir / output_dir to config.json __global__ (any-file config)."""
+def save_global_dirs(dump_dir=None, output_dir=None, auto_open_folder=None):
+    """Persist dump_dir / output_dir / auto_open_folder to config.json __global__."""
     path = os.path.join(_config_dir(), CONFIG_FILE)
     # ensure we write to new file even if old exists and new was just migrated
     data = _load_config_data(path)
@@ -1391,18 +1391,20 @@ def save_global_dirs(dump_dir=None, output_dir=None):
         g['dump_dir'] = str(dump_dir)
     if output_dir is not None:
         g['output_dir'] = str(output_dir)
+    if auto_open_folder is not None:
+        g['auto_open_folder'] = bool(auto_open_folder)
     data[GLOBAL_CONFIG_KEY] = g
     _save_config_data(path, data)
 
 
 def load_global_dirs():
-    """Return (dump_dir, output_dir) from config.json __global__ or (None, None)."""
+    """Return (dump_dir, output_dir, auto_open_folder) from config.json __global__."""
     path = face_offsets_path()
     data = _load_config_data(path)
     g = data.get(GLOBAL_CONFIG_KEY)
     if not isinstance(g, dict):
-        return None, None
-    return g.get('dump_dir'), g.get('output_dir')
+        return None, None, None
+    return g.get('dump_dir'), g.get('output_dir'), g.get('auto_open_folder')
 
 
 def load_face_offsets(path, char_name):
@@ -1832,6 +1834,7 @@ def _save_prefs(self, context):
             save_global_dirs(
                 dump_dir=dump_dir if dump_dir else None,
                 output_dir=output_dir if output_dir else None,
+                auto_open_folder=getattr(prefs, "auto_open_folder", None),
             )
     except Exception:
         pass
@@ -1996,6 +1999,12 @@ class NHSAddonPreferences(bpy.types.AddonPreferences):
         name="Mod Output Dir",
         default=r"G:\XXMI-Launcher-Portable\Mods\Mods\HeadShrink\assets\Preview",
         subtype='DIR_PATH',
+        update=_save_prefs,
+    )
+    auto_open_folder: bpy.props.BoolProperty(
+        name="Open Folder After Export",
+        description="Open the output folder automatically after exporting a mod",
+        default=True,
         update=_save_prefs,
     )
     dump_dir: bpy.props.StringProperty(
@@ -3939,7 +3948,8 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                               f"{'; cleared ' + str(cleared) + ' stale file(s)' if cleared else ''}"
                               f" | Gate($is)={body_hash} | Position={position_kind}")
         try:
-            bpy.ops.wm.path_open(filepath=output_dir)
+            if getattr(prefs, "auto_open_folder", True):
+                bpy.ops.wm.path_open(filepath=output_dir)
         except Exception:
             pass
         return {'FINISHED'}
@@ -4038,6 +4048,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="⑤ mod 生成 (出力)", icon='EXPORT')
         box.prop(prefs, "output_dir")
+        box.prop(prefs, "auto_open_folder")
         box.operator("headshrink.export_diff", icon='EXPORT')
 
 
@@ -4076,9 +4087,9 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.headshrink_props = bpy.props.PointerProperty(type=NHSProps)
-    # config.json __global__ から dump_dir / output_dir を復元（なんでもあり設定ファイル化）
+    # config.json __global__ から dump_dir / output_dir / auto_open_folder を復元（なんでもあり設定ファイル化）
     try:
-        dump_dir, output_dir = load_global_dirs()
+        dump_dir, output_dir, auto_open_folder = load_global_dirs()
         if (dump_dir or output_dir) and bpy.context.preferences is not None:
             try:
                 prefs = bpy.context.preferences.addons[__name__].preferences
@@ -4089,6 +4100,8 @@ def register():
                 if output_dir and hasattr(prefs, "output_dir"):
                     if prefs.output_dir != output_dir:
                         prefs.output_dir = output_dir
+                if auto_open_folder is not None and hasattr(prefs, "auto_open_folder"):
+                    prefs.auto_open_folder = bool(auto_open_folder)
             except Exception:
                 pass
     except Exception:
