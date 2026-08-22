@@ -33,6 +33,14 @@
   - 診断: U1-U3 (顔独立 VB の VB/IB 置換) は非正規パターンで点滅/フリーズの最有力原因 → 現行 mod から除外済み
   - 正規方式候補: $faceScale+OffsetFace (IB hash 操作) or effieface 方式 (face テクスチャ hash トリガー + cs=Face.hlsl で in-place 変形)
   - フィールドの顔は U4 HEAD グループ (頂点 0..4300 に顔頂点 0..1082 含む) で縮小済み — UI 画面のみ未対応
+- [ ] **T013: headshrink_addon.py リファクタリング** — 2026-08-22 (#081 判断済み、単一ファイル内再構成・インストール機構凍結)
+  - [x] Phase 0: scripts/ の使い捨て調査スクリプト121本を tools/scratch/ へ退避 (e08c8bc)
+  - [x] Phase 1: role 文字列分岐の統合 — baseline で実装済みのため変更なし
+  - [x] Phase 2: update コールバック本体を `_impl` へ抽出・薄アダプタ化 + Fake bpy テスト3件 (4fbf20a)
+  - [x] Phase 3: golden master 4件凍結 → `build_diff_ini` + `ExportDiff.execute` を純関数ヘルパーへ分解、出力バイト一致確認済み (2f19ff0)
+  - [x] Phase 4: `_preview_setup_impl` を5つの論理ブロックヘルパーへ分解 (6a64f4a)
+  - [x] Phase 5: 発火抑止 globals を `_update_state` へ集約 + セクション境界コメント [1]-[8] 付与 (bb0eb2f)
+  - 各 Phase 末尾で `python -m pytest scripts/test_preview_adjust.py` green (194 passed) を機械確認、1 phase = 1 commit
 - [x] T003: Blender 実機での addon 動作確認 — 2026-08-15
   - [x] addon install + import + scale + export 全通過
   - [x] 4 Blender 5.x 互換性バグ修正 (import keyword, PropertyGroup 移動, EnumProperty default, FloatVectorProperty slice)
