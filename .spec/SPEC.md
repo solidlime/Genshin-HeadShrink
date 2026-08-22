@@ -169,6 +169,19 @@
 - v1.9.0/1.9.1 (2026-08-17): position_vb (スキニング前静的バッファ、pointlist パス vs=653c63ba4a73ca8b の vb0) を自動認識して BODY の import/export を切替。毎フレーム再スキニングされるためアニメ追従 + 隙間ゼロの原理。座標系: position_vb = y-up モデルローカル (display = (-lx, -lz, +ly))。draw_vb 置換はアニメ静止の原因 (v1.8.0 初版で実証)
 - v1.8.0/1.8.1 (2026-08-17): ベネット方式完全模倣 — BODY = vb0 (Position) 直接置換 (スキニング前バッファ差し替え、アニメ完全追従で隙間ゼロの原理) + 顔 = CopyDispatch 維持 (ハイブリッド)。export_mode (VB_REPLACE default)。export 時に旧ファイル掃除
 
+### 口つぶれ・チーム画面隙間の解析 (2026-08-22, NG dump FrameAnalysis-2026-08-22-2010)
+- 症状: ①mod 再出力後に口メッシュがつぶれる (Noelle/Sucrose) ②チーム編成画面で無関係キャラの口・目に隙間
+- **根因 A: 顔パーツ CopyDispatch HLSL が非冪等**。`rw_buffer[DTid.x].position += key[DTid.x].position - base[DTid.x].position` の累算式で、同一 bind に一致するセクションが複数回実行されると N 回適用 = N 倍縮小 → つぶれ/部品剥離 → 隙間。hlsl は全キャラ同一内容 (MD5 96DB33FD...)
+- **根因 B: 顔パーツ VB ハッシュが同体型キャラ間で共有**。口 6192fe1c+d265427c は Noelle.ini と Sucrose.ini の双方に存在 (他: Furina/Lynette/Nilou efa4da64+5c536604、Furina/Lanyan/Mizuki f4d23e3c、Barbara/Sucrose brow 2cfd04ad、Lynette/Yanfei 9c75320a、Barbara/Kokomi/Yanfei 口 c9846fd5+7a73d3b5)。$is は ini ファイル単位で独立なため、ソロ表示では事実上の排他として働くが、同時表示では全員のゲートが発火し共有ハッシュに人数分 Δ が加算される
+- 対応方針: P1 = HLSL 冪等化 (距離比較で cur≈key なら skip / cur≈base なら適用、生成テンプレ変更で全キャラに効く) / P2 = オフラインテスト (二重・三重適用 = 1 回分を検証) / P3 = チーム画面ダンプで代替仮説「ゲートレース (自分のゲート発火前に顔パーツが描画されスキップ→無縮小)」の有無を確認
+- **P3 検証完了 (2026-08-22, 編成画面ダンプ FrameAnalysis-2026-08-22-212336)**: 根因 A+B を実証
+  - 同一フレーム同一シェーダー重複 Dispatch 32件。Frame 234/240/258/264 は NoelleMouth×2 + SucroseMouth×2 (共有口ハッシュに 4 回 Δ)。Frame 237/243/261/267 は FurinaMouth + NilouMouth_5c536604 が連鎖
+  - メカニズム: 同一 bind に一致する全 ini のセクションが順次実行され、2 個目以降は改変済み dif を copy するため Δ 累算。$is は ini 単位のため画面内全員のゲートが上がると人数分適用
+  - 口バッファの Map は frame 1 のみ (以後ゲームからの再アップロードなし)
+  - ゲートレース仮説は棄却: `if $is: false` 40件は全て画面外キャラ (Lynette/Lanyan/Mizuki/Barbara/effieface)
+  - 「隙間」の正体は過剰縮小による目・口メッシュの剥離。ソロで無症状なのは自分の ini の $is しか上がらないため
+- 参考: 「たまにズレ」は別根因 — 口 VB ハッシュが表情状態で 6192fe1c ⇄ d265427c に切替わるためで、auto_extra_hashes による変種セクション自動追加で対応済み (v1.9.x)
+
 ## Noelle 実ダンプ構成 (2026-08-15 検証済み, FrameAnalysis-2026-08-15-222105)
 
 | パーツ | VB hash | IB hash | 頂点数 | 備考 |
