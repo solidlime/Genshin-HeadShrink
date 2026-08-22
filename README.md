@@ -35,7 +35,7 @@ Open the `HeadShrink` tab in Blender's N-panel and work top to bottom.
 Point it at your dump folder (e.g. `assets/Dump/Yanfei`). The character name is filled in automatically.
 
 ### 2. Register Meshes
-Click **Analyze Dump** — it lists the mesh pairs found in the dump. Click each entry to preview it, then use **表示中のペアを登録** (Register Displayed Pair) to assign it as `BODY`, `MOUTH`, `EYES`, or `BROW`. One `BODY` is required; face parts are optional.
+Click **Analyze Dump** — it lists the mesh pairs found in the dump. Click each entry to preview it, then use **表示中のペアを登録** (Register Displayed Pair) to assign it as `BODY`, `MOUTH`, `EYES`, or `BROW`. One `BODY` is required; face parts are optional. Re-opening the same dump folder no longer clears your registrations.
 
 ### 3. Auto Setup
 One click builds the whole preview scene: loads the meshes, places them, and creates the shrink box.
@@ -54,13 +54,21 @@ Set an output folder and click **Mod Export**. You get a `.ini` plus buffers —
 
 Copy the exported folder into XXMI's `Mods` directory (e.g. `…\XXMI-Launcher\Mods\Mods\HeadShrink\Yanfei\`), launch the game through XXMI, and check the result. The body follows animations seamlessly; only the head is shrunk.
 
+> **Updating from an older version?** Re-export **all** of your character mods, not just the one you're working on. Face meshes are shared between characters internally, so one outdated mod can break the others (flickering, squashed mouths). Mixed old/new exports are not supported.
+
 ## FAQ
 
 **Q. My mod's mouth effect shows up on other characters too**
 A. Face meshes are shared between characters internally. Recent exports guard against this automatically — re-export with the latest version of the addon.
 
+**Q. The head/eyes/mouth flicker between shrunk and normal size, or the mouth collapses**
+A. Fixed in recent versions (idempotent shaders + expression-variant tolerance). Re-export **all** your character mods with the latest addon — a single leftover mod made with an older version can still trigger it.
+
 **Q. Weird textures flash all over the screen**
 A. Usually caused by a mod made with an older version. Re-export with the latest version.
+
+**Q. The face offset fields (eyes/mouth/brow) don't do anything**
+A. They were temporarily disabled and are working again in the latest version. Re-export to pick up the fix. Note: when several shrunken characters are on screen at once (e.g. the party screen), shared face parts follow whichever character comes first alphabetically — solo play is unaffected.
 
 **Q. `launch_blender.bat` won't start Blender**
 A. Run it as administrator once, or turn on Developer Mode (Windows Settings → For developers).
