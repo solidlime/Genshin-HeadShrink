@@ -2930,24 +2930,8 @@ def _median(values):
     return (s[mid - 1] + s[mid]) / 2.0
 
 
-def _preview_setup_impl(self, context):
-    """Shared Preview Setup body (NHS_OT_PreviewSetup / NHS_OT_AutoSetup).
-
-    Duplicates the dump meshes into HS_Preview, auto-places shared face
-    units onto the body's head, re-applies saved face offsets, switches the
-    3D viewport to SOLID and draws the shrink box. self must expose
-    report(); returns an operator status dict.
-    """
-    src = bpy.data.collections.get(DUMP_COLLECTION)
-    if src is None:
-        self.report({'ERROR'}, f"No {DUMP_COLLECTION} collection (Import Dump first)")
-        return {'CANCELLED'}
-    src_objs = [o for o in src.objects
-                if o.type == 'MESH' and o.get('hs_vb0_hash')]
-    if not src_objs:
-        self.report({'ERROR'}, f"No hs_vb0_hash meshes in {DUMP_COLLECTION}")
-        return {'CANCELLED'}
-    # Recreate HS_Preview
+def _preview_recreate_collection(context, src_objs):
+    """HS_Preview を作り直し、dump メッシュのコピーをリンクして返す。"""
     old = bpy.data.collections.get(PREVIEW_COLLECTION)
     if old is not None:
         for o in list(old.objects):
@@ -2975,166 +2959,174 @@ def _preview_setup_impl(self, context):
         if s.get('hs_vert_count'):
             obj["hs_vert_count"] = s["hs_vert_count"]
         coll.objects.link(obj)
-    # 偽Bodyは x,y=0 に置くだけ (汎用 IB分割対応)
-    for o in [x for x in coll.objects if x.get('hs_is_fake_body')]:
-        o.location = (0.0, 0.0, 0.0)
-    # Auto-place shared face units onto the body's head: the face VBs are
-    # character-shared and dumped in their own local space, so they appear
-    # near the waist. Offset each by (head_center - face_center) on the
-    # object location (display coords; user can still tweak with G).
-    preview_objs = [o for o in coll.objects if o.type == 'MESH']
-    if preview_objs:
-        body_objs = [o for o in preview_objs if o.get('hs_role') == 'BODY']
-        main = body_objs[0] if body_objs else max(
-            preview_objs, key=lambda o: len(o.data.vertices))
-        # BODY が position_vb 空間 (hs_position_vb あり) の場合、顔メッシュ
-        # (draw_vb 空間) は最近傍スキニング変位加算で position_vb 空間に
-        # 近似配置する。BODY の draw_vb 頂点はダンプから再読込する
-        # (position_vb 空間の v.co とは別空間のため)。ペアが見つからない /
-        # 読込失敗時は従来の head_center 配置にフォールバック。
-        # 偽Bodyは position_vb を持たず x,y=0 のままなので PV配置はスキップ
-        use_pv_placement = bool(main.get('hs_position_vb')) and not bool(main.get('hs_is_fake_body'))
-        # 配置アンカー「頭部領域中心」: 顔メッシュのローカル座標が体の腰付近と
-        # 重なる場合、_face_draw_to_body_space の最近傍はお腹の頂点に吸着して
-        # しまう。BODY 頭部 bbox (z 上位35%) 中心へ各顔の表示 bbox 中心を
-        # 合わせて配置する (x は左右対称のため 0 固定)。頭部 bbox が取れない
-        # 場合のみ従来の draw→body 最近傍配置にフォールバックする。
-        head = _body_head_bbox(preview_objs) if use_pv_placement else None
-        locs = []
-        if use_pv_placement and head is not None:
-            head_center = head[0]
+    return coll
+
+
+def _preview_auto_place_faces(preview_objs):
+    """顔メッシュを BODY 頭部へ自動配置する。
+
+    戻り値は (main, use_pv_placement)。use_pv_placement は draw_vb 読込に
+    失敗した場合 False へ倒れる (呼び出し側の境界マッチング判定と共有)。
+    """
+    body_objs = [o for o in preview_objs if o.get('hs_role') == 'BODY']
+    main = body_objs[0] if body_objs else max(
+        preview_objs, key=lambda o: len(o.data.vertices))
+    # BODY が position_vb 空間 (hs_position_vb あり) の場合、顔メッシュ
+    # (draw_vb 空間) は最近傍スキニング変位加算で position_vb 空間に
+    # 近似配置する。BODY の draw_vb 頂点はダンプから再読込する
+    # (position_vb 空間の v.co とは別空間のため)。ペアが見つからない /
+    # 読込失敗時は従来の head_center 配置にフォールバック。
+    # 偽Bodyは position_vb を持たず x,y=0 のままなので PV配置はスキップ
+    use_pv_placement = bool(main.get('hs_position_vb')) and not bool(main.get('hs_is_fake_body'))
+    # 配置アンカー「頭部領域中心」: 顔メッシュのローカル座標が体の腰付近と
+    # 重なる場合、_face_draw_to_body_space の最近傍はお腹の頂点に吸着して
+    # しまう。BODY 頭部 bbox (z 上位35%) 中心へ各顔の表示 bbox 中心を
+    # 合わせて配置する (x は左右対称のため 0 固定)。頭部 bbox が取れない
+    # 場合のみ従来の draw→body 最近傍配置にフォールバックする。
+    head = _body_head_bbox(preview_objs) if use_pv_placement else None
+    locs = []
+    if use_pv_placement and head is not None:
+        head_center = head[0]
+        for o in preview_objs:
+            if o is main:
+                continue
+            face_c = _face_mesh_center(o)
+            if face_c is None:
+                continue
+            o.location = (0.0, head_center[1] - face_c[1],
+                          head_center[2] - face_c[2])
+    else:
+        body_draw_verts = None
+        body_pos_verts = None
+        if use_pv_placement:
+            body_draw_verts = _load_body_draw_verts(main)
+            if body_draw_verts:
+                body_pos_verts = [tuple(v.co) for v in main.data.vertices]
+            else:
+                use_pv_placement = False
+        if use_pv_placement:
+            # 顔メッシュを draw_vb → position_vb 空間に近似配置 (loc のみ変更、
+            # v.co は draw_vb 空間のまま → export は loc と独立)。
             for o in preview_objs:
                 if o is main:
                     continue
-                face_c = _face_mesh_center(o)
-                if face_c is None:
+                loc = _face_draw_to_body_space(o, body_draw_verts,
+                                               body_pos_verts)
+                if loc is not None:
+                    locs.append(loc)
+        if use_pv_placement and locs:
+            # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
+            # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
+            # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
+            # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
+            common_loc = (0.0,
+                          0.0,
+                          _median([loc[2] for loc in locs]))
+            for o in preview_objs:
+                if o is main:
                     continue
-                o.location = (0.0, head_center[1] - face_c[1],
-                              head_center[2] - face_c[2])
+                o.location = common_loc
         else:
-            body_draw_verts = None
-            body_pos_verts = None
-            if use_pv_placement:
-                body_draw_verts = _load_body_draw_verts(main)
-                if body_draw_verts:
-                    body_pos_verts = [tuple(v.co) for v in main.data.vertices]
-                else:
-                    use_pv_placement = False
-            if use_pv_placement:
-                # 顔メッシュを draw_vb → position_vb 空間に近似配置 (loc のみ変更、
-                # v.co は draw_vb 空間のまま → export は loc と独立)。
-                for o in preview_objs:
-                    if o is main:
-                        continue
-                    loc = _face_draw_to_body_space(o, body_draw_verts,
-                                                   body_pos_verts)
-                    if loc is not None:
-                        locs.append(loc)
-            if use_pv_placement and locs:
-                # 目/口/眉は同一 draw_vb 空間・同一親トランスフォームで描画される
-                # ため、各顔の個別 loc の中央値を共通移動量として全顔に適用する
-                # (口は表情で形状が変わるため個別計算だとズレるが、共通化で平均化)。
-                # x は左右対称のため常に 0.0 に固定 (計算値だとバラつく)。
-                common_loc = (0.0,
-                              0.0,
-                              _median([loc[2] for loc in locs]))
-                for o in preview_objs:
-                    if o is main:
-                        continue
-                    o.location = common_loc
-            else:
-                # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
-                # になるため、正規position_vbの頭部中心を優先して使う (generic)。
-                if bool(main.get('hs_is_fake_body')):
+            # Fake Body (IB分割で最大vb0=220k等が偽) は誤ったstrideで読まれゴミ座標
+            # になるため、正規position_vbの頭部中心を優先して使う (generic)。
+            if bool(main.get('hs_is_fake_body')):
+                head_center = None
+                try:
+                    real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
+                    if real and real.get('path') and os.path.exists(real['path']):
+                        with open(real['path'], 'rb') as _f:
+                            _d = _f.read()
+                        _n = len(_d) // DUMP_STRIDE
+                        _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
+                        head_center = head_center_from_verts(_verts)
+                except Exception:
                     head_center = None
-                    try:
-                        real = _find_real_position_vb(_dump_cache.get('position_vb') or {}) or _dump_cache.get('real_position_vb')
-                        if real and real.get('path') and os.path.exists(real['path']):
-                            with open(real['path'], 'rb') as _f:
-                                _d = _f.read()
-                            _n = len(_d) // DUMP_STRIDE
-                            _verts = [position_vb_to_display(struct.unpack_from('<3f', _d, i * DUMP_STRIDE)) for i in range(_n)]
-                            head_center = head_center_from_verts(_verts)
-                    except Exception:
-                        head_center = None
-                    if head_center is None:
-                        head_center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
-                else:
-                    head_center = head_center_from_verts(
-                        [tuple(v.co) for v in main.data.vertices])
-                if head_center is not None:
-                    for o in preview_objs:
-                        if o is main:
-                            continue
-                        verts = [tuple(v.co) for v in o.data.vertices]
-                        if not verts:
-                            continue
-                        face_center = tuple(
-                            sum(p[i] for p in verts) / len(verts) for i in range(3))
-                        if use_pv_placement:
-                            # PVフォールバック: x,yは0固定 (対称性維持)
-                            o.location = (0.0, 0.0, head_center[2] - face_center[2])
-                        else:
-                            o.location = tuple(head_center[i] - face_center[i] for i in range(3))
-        # 境界ギャップ閉じ (pv配置後): head / common_loc 配置後の顔表示頂点と
-        # BODY 表面の最近傍ペアから y/z ギャップを収束させて表面にスナップする
-        # (x は対称のため 0 固定)。頭部に近づいたことで最近傍が顔領域の頂点に
-        # なり正しくスナップする。保存済み offsets (saved) の再適用より前に置き、
-        # ユーザーの G 調整が常に優先される順序を維持する。
-        if use_pv_placement and (head is not None or locs):
-            face_objs_pv = [o for o in preview_objs if o is not main]
-            if face_objs_pv and np is not None:
-                matched = _match_face_offsets(
-                    main, face_objs_pv,
-                    {o.get('hs_vb0_hash', ''): tuple(o.location)
-                     for o in face_objs_pv})
-                for o in face_objs_pv:
-                    loc = matched.get(o.get('hs_vb0_hash', ''))
-                    if loc is not None:
-                        o.location = (0.0, loc[1], loc[2])
-        # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
-        # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
-        for o in preview_objs:
-            if o is not main:
-                o.rotation_euler = (0.0, 0.0, math.pi)
-        # Re-apply saved per-character face offsets if any (overrides auto
-        # placement with the user's G-key tweaks from a previous session).
-        saved = load_face_offsets(face_offsets_path(),
-                                  context.scene.headshrink_props.char_name)
-        for o in preview_objs:
-            if o.name in saved:
-                o.location = tuple(saved[o.name])
-        # 境界マッチング: 保存済み offsets の無い顔メッシュのみ、body との
-        # 最近傍境界ペアから収束 loc を自動計算して適用 (保存値は従来通り
-        # 優先。収束値は JSON には保存せず、毎回 auto_setup で再計算)。
-        # position_vb 配置時は空間が異なるため実行しない (無意味)。
-        if not use_pv_placement:
-            face_objs = [o for o in preview_objs
-                         if o is not main and o.name not in saved]
-            if face_objs:
-                initial_locs = {o.get('hs_vb0_hash', ''): tuple(o.location)
-                                for o in face_objs}
-                matched = _match_face_offsets(main, face_objs, initial_locs)
-                for o in face_objs:
-                    loc = matched.get(o.get('hs_vb0_hash', ''))
-                    if loc is not None:
-                        o.location = loc
-        # Record the final placement (after auto-placement + saved offsets)
-        # so Reset Preview can restore G-key moved faces to the setup-time
-        # position. Stored per-vertex (POINT domain) like hs_original_pos;
-        # read back via data[0].vector.
-        for o in preview_objs:
-            loc = tuple(o.location)
-            attr = o.data.attributes.new(
-                name='hs_original_loc', type='FLOAT_VECTOR', domain='POINT')
-            attr.data.foreach_set('vector', list(loc) * len(o.data.vertices))
-            # 顔メッシュ (main 以外) は配置位置を hs_face_origin として保存。
-            # 縮小 pivot は box 中央をこの原点基準で顔ローカル空間に変換して
-            # 使う (_face_shrink_pivot)。G キーで動かしてもローカル pivot は
-            # 不変のため export (v.co のみ) と分離できる。
-            if o is not main:
-                o['hs_face_origin'] = tuple(o.location)
-    # Solid display in any 3D viewport
+                if head_center is None:
+                    head_center = head_center_from_verts([tuple(v.co) for v in main.data.vertices])
+            else:
+                head_center = head_center_from_verts(
+                    [tuple(v.co) for v in main.data.vertices])
+            if head_center is not None:
+                for o in preview_objs:
+                    if o is main:
+                        continue
+                    verts = [tuple(v.co) for v in o.data.vertices]
+                    if not verts:
+                        continue
+                    face_center = tuple(
+                        sum(p[i] for p in verts) / len(verts) for i in range(3))
+                    if use_pv_placement:
+                        # PVフォールバック: x,yは0固定 (対称性維持)
+                        o.location = (0.0, 0.0, head_center[2] - face_center[2])
+                    else:
+                        o.location = tuple(head_center[i] - face_center[i] for i in range(3))
+    # 境界ギャップ閉じ (pv配置後): head / common_loc 配置後の顔表示頂点と
+    # BODY 表面の最近傍ペアから y/z ギャップを収束させて表面にスナップする
+    # (x は対称のため 0 固定)。頭部に近づいたことで最近傍が顔領域の頂点に
+    # なり正しくスナップする。保存済み offsets (saved) の再適用より前に置き、
+    # ユーザーの G 調整が常に優先される順序を維持する。
+    if use_pv_placement and (head is not None or locs):
+        face_objs_pv = [o for o in preview_objs if o is not main]
+        if face_objs_pv and np is not None:
+            matched = _match_face_offsets(
+                main, face_objs_pv,
+                {o.get('hs_vb0_hash', ''): tuple(o.location)
+                 for o in face_objs_pv})
+            for o in face_objs_pv:
+                loc = matched.get(o.get('hs_vb0_hash', ''))
+                if loc is not None:
+                    o.location = (0.0, loc[1], loc[2])
+    # 顔メッシュは draw_vb 空間で描画されるため、プレビュー表示用に
+    # Z 軸 180° 回転を適用する (export は v.co のみ使用するため mod には影響しない)。
+    for o in preview_objs:
+        if o is not main:
+            o.rotation_euler = (0.0, 0.0, math.pi)
+    return main, use_pv_placement
+
+
+def _preview_apply_saved_offsets(preview_objs, main, char_name,
+                                 use_pv_placement):
+    """保存済み per-character face offsets を再適用する。
+
+    ユーザーの G-key 調整が自動配置より優先される。保存済み offsets の無い
+    顔メッシュのみ、body との最近傍境界ペアから収束 loc を自動計算して適用
+    (収束値は JSON には保存せず、毎回 auto_setup で再計算)。
+    position_vb 配置時は空間が異なるため実行しない (無意味)。
+    """
+    saved = load_face_offsets(face_offsets_path(), char_name)
+    for o in preview_objs:
+        if o.name in saved:
+            o.location = tuple(saved[o.name])
+    if not use_pv_placement:
+        face_objs = [o for o in preview_objs
+                     if o is not main and o.name not in saved]
+        if face_objs:
+            initial_locs = {o.get('hs_vb0_hash', ''): tuple(o.location)
+                            for o in face_objs}
+            matched = _match_face_offsets(main, face_objs, initial_locs)
+            for o in face_objs:
+                loc = matched.get(o.get('hs_vb0_hash', ''))
+                if loc is not None:
+                    o.location = loc
+
+
+def _preview_record_placement(preview_objs, main):
+    """最終配置を記録する (Reset Preview 復元用 + 顔 pivot 原点)。"""
+    for o in preview_objs:
+        loc = tuple(o.location)
+        attr = o.data.attributes.new(
+            name='hs_original_loc', type='FLOAT_VECTOR', domain='POINT')
+        attr.data.foreach_set('vector', list(loc) * len(o.data.vertices))
+        # 顔メッシュ (main 以外) は配置位置を hs_face_origin として保存。
+        # 縮小 pivot は box 中央をこの原点基準で顔ローカル空間に変換して
+        # 使う (_face_shrink_pivot)。G キーで動かしてもローカル pivot は
+        # 不変のため export (v.co のみ) と分離できる。
+        if o is not main:
+            o['hs_face_origin'] = tuple(o.location)
+
+
+def _preview_configure_viewport(context, src):
+    """3D viewport を SOLID 表示に切り替え、ソース dump collection を隠す。"""
     if context.screen:
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
@@ -3145,6 +3137,47 @@ def _preview_setup_impl(self, context):
     # positions (shared face VBs sit near the waist) and would confuse the
     # preview if left visible next to the auto-placed copies.
     src.hide_viewport = True
+
+
+def _preview_setup_impl(self, context):
+    """Shared Preview Setup body (NHS_OT_PreviewSetup / NHS_OT_AutoSetup).
+
+    Duplicates the dump meshes into HS_Preview, auto-places shared face
+    units onto the body's head, re-applies saved face offsets, switches the
+    3D viewport to SOLID and draws the shrink box. self must expose
+    report(); returns an operator status dict.
+    """
+    src = bpy.data.collections.get(DUMP_COLLECTION)
+    if src is None:
+        self.report({'ERROR'}, f"No {DUMP_COLLECTION} collection (Import Dump first)")
+        return {'CANCELLED'}
+    src_objs = [o for o in src.objects
+                if o.type == 'MESH' and o.get('hs_vb0_hash')]
+    if not src_objs:
+        self.report({'ERROR'}, f"No hs_vb0_hash meshes in {DUMP_COLLECTION}")
+        return {'CANCELLED'}
+    coll = _preview_recreate_collection(context, src_objs)
+    # 偽Bodyは x,y=0 に置くだけ (汎用 IB分割対応)
+    for o in [x for x in coll.objects if x.get('hs_is_fake_body')]:
+        o.location = (0.0, 0.0, 0.0)
+    # Auto-place shared face units onto the body's head: the face VBs are
+    # character-shared and dumped in their own local space, so they appear
+    # near the waist. Offset each by (head_center - face_center) on the
+    # object location (display coords; user can still tweak with G).
+    preview_objs = [o for o in coll.objects if o.type == 'MESH']
+    if preview_objs:
+        main, use_pv_placement = _preview_auto_place_faces(preview_objs)
+        # Re-apply saved per-character face offsets if any (overrides auto
+        # placement with the user's G-key tweaks from a previous session).
+        _preview_apply_saved_offsets(
+            preview_objs, main, context.scene.headshrink_props.char_name,
+            use_pv_placement)
+        # Record the final placement (after auto-placement + saved offsets)
+        # so Reset Preview can restore G-key moved faces to the setup-time
+        # position. Stored per-vertex (POINT domain) like hs_original_pos;
+        # read back via data[0].vector.
+        _preview_record_placement(preview_objs, main)
+    _preview_configure_viewport(context, src)
     # Orange wireframe of the shrink box, origin at shrink_center so the
     # user can grab it with G and Apply Box Position reads it back.
     props = context.scene.headshrink_props
