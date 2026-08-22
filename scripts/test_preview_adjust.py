@@ -20,33 +20,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 # --- minimal bpy stub: only needed for class definitions to import ---
-if 'bpy' not in sys.modules:
-    bpy_stub = types.ModuleType('bpy')
+# 共有 stub (bpy_teststub) を無条件 import — import 順に依存しない単一定義。
+import bpy_teststub  # noqa: E402
 
-    def _prop_fn(*args, **kwargs):
-        return None
+sys.modules.setdefault('bpy', bpy_teststub.bpy)
 
-    class _Base:
-        pass
 
-    props = types.SimpleNamespace(
-        StringProperty=_prop_fn, FloatVectorProperty=_prop_fn,
-        EnumProperty=_prop_fn, PointerProperty=_prop_fn,
-        CollectionProperty=_prop_fn, PropertyGroup=_Base,
-        FloatProperty=_prop_fn, BoolProperty=_prop_fn,
-        IntProperty=_prop_fn,
-    )
-
-    bpy_stub.props = props
-    bpy_stub.types = types.SimpleNamespace(
-        PropertyGroup=_Base, Operator=_Base, Panel=_Base, UIList=_Base,
-        AddonPreferences=_Base)
-    bpy_stub.utils = types.SimpleNamespace(
-        register_class=lambda c: None, unregister_class=lambda c: None)
-    bpy_stub.path = types.SimpleNamespace(abspath=lambda p: p)
-    bpy_stub.data = types.SimpleNamespace()
-    bpy_stub.context = types.SimpleNamespace()
-    sys.modules['bpy'] = bpy_stub
+def setUpModule():
+    bpy_teststub.reset()
 
 import headshrink_addon as hs  # noqa: E402
 
@@ -3055,6 +3036,7 @@ class GoldenMasterTest(unittest.TestCase):
         coll = types.SimpleNamespace(
             objects=[_Obj('Mouth1', '6192fe1c', 100),
                      _Obj('Mouth2', 'd265427c', 100)])
+        saved_data_collections = getattr(hs.bpy.data, 'collections', None)
         hs.bpy.data.collections = types.SimpleNamespace(
             get=lambda name: coll if name == 'HS_Preview' else None)
         saved = (hs.bpy.path.abspath, hs._clean_export_dir,
@@ -3076,6 +3058,13 @@ class GoldenMasterTest(unittest.TestCase):
         finally:
             (hs.bpy.path.abspath, hs._clean_export_dir,
              hs._find_face_diffuse_hash, hs.auto_extra_hashes) = saved
+            if saved_data_collections is None:
+                try:
+                    delattr(hs.bpy.data, 'collections')
+                except AttributeError:
+                    pass
+            else:
+                hs.bpy.data.collections = saved_data_collections
         self.assertEqual(result, {'FINISHED'})
         out_dir = os.path.join(tmp, 'Noelle')
         for fn in ('Noelle.ini', 'NoelleHead.hlsl',

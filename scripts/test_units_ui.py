@@ -19,42 +19,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 # --- minimal bpy stub: only needed for class definitions to import ---
-if 'bpy' not in sys.modules:
-    bpy_stub = types.ModuleType('bpy')
+# 共有 stub (bpy_teststub) を無条件 import — import 順に依存しない単一定義。
+import bpy_teststub  # noqa: E402
 
-    def _prop_fn(*args, **kwargs):
-        return None
+sys.modules.setdefault('bpy', bpy_teststub.bpy)
 
-    class _Base:
-        def __init__(self):
-            self._reports = []
 
-        def report(self, level, msg):
-            self._reports.append((set(level), msg))
-
-    props = types.SimpleNamespace(
-        StringProperty=_prop_fn, FloatVectorProperty=_prop_fn,
-        EnumProperty=_prop_fn, PointerProperty=_prop_fn,
-        CollectionProperty=_prop_fn, PropertyGroup=_Base,
-        FloatProperty=_prop_fn, BoolProperty=_prop_fn,
-        IntProperty=_prop_fn,
-    )
-
-    bpy_stub.props = props
-    bpy_stub.types = types.SimpleNamespace(
-        PropertyGroup=_Base, Operator=_Base, Panel=_Base, UIList=_Base,
-        AddonPreferences=_Base)
-    bpy_stub.utils = types.SimpleNamespace(
-        register_class=lambda c: None, unregister_class=lambda c: None)
-    bpy_stub.path = types.SimpleNamespace(abspath=lambda p: p)
-    bpy_stub.data = types.SimpleNamespace(
-        objects=[],
-        collections={},
-    )
-    bpy_stub.app = types.SimpleNamespace(
-        timers=types.SimpleNamespace(register=lambda fn, **kw: None))
-    bpy_stub.context = types.SimpleNamespace()
-    sys.modules['bpy'] = bpy_stub
+def setUpModule():
+    bpy_teststub.reset()
 
 import headshrink_addon as hs  # noqa: E402
 
