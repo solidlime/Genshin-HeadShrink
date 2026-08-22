@@ -1709,7 +1709,7 @@ def _create_shrink_box(coll, center, half):
     return obj
 
 
-def _preview_props_update(self, context):
+def _preview_props_update_impl(props, context):
     """Live-apply shrink params to HS_Preview meshes (no-op when unavailable).
 
     Called on every change of shrink_center / shrink_half / shrink_scale.
@@ -1726,16 +1726,16 @@ def _preview_props_update(self, context):
     coll = bpy.data.collections.get(PREVIEW_COLLECTION)
     if coll is None:
         return
-    center = tuple(self.shrink_center)
-    half = tuple(self.shrink_half)
+    center = tuple(props.shrink_center)
+    half = tuple(props.shrink_half)
     # Generic sanitize for Body (Lanyan fake Body x/y collapsed -> Z only)
     # _sanitize_half maps 0/微小 -> 0.15 so Body shrinks uniformly.
     half_body = _sanitize_half(half)
-    scale = self.shrink_scale
-    falloff = self.shrink_falloff
-    shift = tuple(self.shrink_shift)
-    if self.shrink_scale_mode == 'PER_AXIS':
-        axis_scale = tuple(self.shrink_scale_xyz)
+    scale = props.shrink_scale
+    falloff = props.shrink_falloff
+    shift = tuple(props.shrink_shift)
+    if props.shrink_scale_mode == 'PER_AXIS':
+        axis_scale = tuple(props.shrink_scale_xyz)
         scale = 1.0  # unused in this mode
     else:
         axis_scale = None
@@ -1754,14 +1754,19 @@ def _preview_props_update(self, context):
                 preview_shrink_mesh(obj.data, center, half_body, scale,
                                     tuple(obj.location), falloff, shift,
                                     False, pivot, axis_scale)
-                off = _face_offset_for_role(self, obj.get('hs_role'))
+                off = _face_offset_for_role(props, obj.get('hs_role'))
                 if off is not None:
                     _apply_face_offset(obj, tuple(off))
     _sync_shrink_box(center, half_body)
 
 
-def _dump_dir_update(self, context):
-    """dump_dir 変更時に自動セットアップを予約 (update コールバック)。
+def _preview_props_update(self, context):
+    """update コールバック (薄いアダプタ)。本体は _impl へ。"""
+    _preview_props_update_impl(self, context)
+
+
+def _dump_dir_update_impl(props, context):
+    """dump_dir 変更時に自動セットアップを予約。
 
     bpy.ops を update コールバック内から直接呼ぶと再入するため、タイマーで
     0.1 秒後に実行する。同一パスの連続発火は _last_auto_setup_dir で抑止
@@ -1769,7 +1774,7 @@ def _dump_dir_update(self, context):
     units 未登録のキャラでは発火しない (手動ボタンで実行)。
     """
     global _last_auto_setup_dir
-    new_dir = bpy.path.abspath(self.dump_dir)
+    new_dir = bpy.path.abspath(props.dump_dir)
     if not os.path.isdir(new_dir):
         return
     has_file = _has_registered_units(context.scene.headshrink_props.char_name)
@@ -1794,6 +1799,11 @@ def _dump_dir_update(self, context):
         return None  # タイマー解除
 
     bpy.app.timers.register(_run_auto_setup, first_interval=0.1)
+
+
+def _dump_dir_update(self, context):
+    """update コールバック (薄いアダプタ)。本体は _impl へ。"""
+    _dump_dir_update_impl(self, context)
 
 
 def _save_prefs(self, context):

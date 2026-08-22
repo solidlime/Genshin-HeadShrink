@@ -660,5 +660,42 @@ class LoadConfigTest(unittest.TestCase):
         self.assertIn('Loaded 1 default settings', op._reports[0][1])
 
 
+class UpdateCallbackTest(unittest.TestCase):
+    """update コールバック薄化: アダプタが _impl へ委譲することの検証。"""
+
+    def setUp(self):
+        self._orig_mode = getattr(hs.bpy.context, 'mode', None)
+
+    def tearDown(self):
+        if self._orig_mode is None:
+            try:
+                del hs.bpy.context.mode
+            except AttributeError:
+                pass
+        else:
+            hs.bpy.context.mode = self._orig_mode
+
+    def test_preview_props_update_delegates_to_impl(self):
+        calls = []
+        orig = hs._preview_props_update_impl
+        hs._preview_props_update_impl = lambda props, ctx: calls.append((props, ctx))
+        try:
+            props, ctx = object(), object()
+            hs._preview_props_update(props, ctx)
+        finally:
+            hs._preview_props_update_impl = orig
+        self.assertEqual(calls, [(props, ctx)])
+
+    def test_preview_props_update_impl_noop_without_collection(self):
+        hs.bpy.context.mode = 'OBJECT'
+        # stub の bpy.data.collections は空 dict -> get() は None -> no-op
+        self.assertIsNone(
+            hs._preview_props_update_impl(types.SimpleNamespace(), None))
+
+    def test_dump_dir_update_impl_noop_for_missing_dir(self):
+        props = types.SimpleNamespace(dump_dir=r'Z:\definitely\not\here')
+        self.assertIsNone(hs._dump_dir_update_impl(props, None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
