@@ -1,6 +1,10 @@
 # TODO - タスクリスト
 
 ## 優先度：高
+- [x] **T018: face offset 復活 — キャラ毎 Key への配置移動再導入** — 2026-08-23 完了 (commit b110514、#081 REVIEW PASS、pytest 274 passed / 1 skipped。詳細は SPEC「T018」節)
+  - [x] a: `_face_key_verts` に offset 引数追加 (デフォルト (0,0,0))、呼び出し側で role→prop 解決 + `display_to_game(offset)` 変換
+  - [x] b: offset 反映テスト追加 (`test_key_offset_translation`) + 既存テスト無変更通過確認 + pytest 全 green
+  - [ ] c: 全キャラ再エクスポート or Key.buf 再生成 (ユーザー作業。オフセット値は config.json 由来)
 - [x] **T017: 点滅恒久対応 — DIFF_HLSL の HS_EPS 恒久化** — 2026-08-23 完了 (commit 5843a12、pytest 273 passed / 1 skipped。実機検証済み、詳細は SPEC「T017」節)
   - [x] a: テンプレ定数 `#define HS_EPS 1e-4` → `5e-3` + 上限コメント (variant差>5e-3 で再発の既知上限)。drive-by: hlsl 書き出しに encoding='utf-8' 追加 (cp932 既定の文字化け防止)
   - [x] b: golden NoelleHead.hlsl 意図的更新 (EPS 行+コメントのみ) + 冪等テストを EPS 自動取得化・variant 収束テスト更新。pytest 273 passed / 1 skipped
