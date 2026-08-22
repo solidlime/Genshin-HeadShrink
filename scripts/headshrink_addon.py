@@ -1852,6 +1852,12 @@ def _save_prefs(self, context):
         pass
 
 
+# T016: 起動時の prefs 復元 (register → load_global_dirs) 中は True。
+# 復元の dump_dir 代入で update が発火しても units リストをクリアしないための
+# 抑止フラグ (try/finally で必ず戻す)。
+_restoring_prefs = False
+
+
 def _dump_dir_changed(self, context):
     """dump_dir 変更時: Character 自動反映 + units リセット + 自動セットアップ予約 + userpref 自動保存。"""
     try:
@@ -1863,13 +1869,14 @@ def _dump_dir_changed(self, context):
             if base and context and getattr(context, "scene", None) \
                and hasattr(context.scene, "headshrink_props"):
                 props = context.scene.headshrink_props
+                # T016: クリアはキャラが実際に切替わった時だけ。同一キャラでの
+                # 再オープンや起動時復元では前キャラの units 登録を保持する
+                # (config.json の保存データは触らない)。
                 if base != props.char_name:
                     props.char_name = base
-                # ダンプディレクトリ変更 = キャラ切替とみなし、前キャラの units
-                # (vb0 ハッシュ登録) をメモリ上からクリアする。config.json の
-                # 保存データは触らない。
-                props.units_list.clear()
-                props.units_list_index = 0
+                    if not _restoring_prefs:
+                        props.units_list.clear()
+                        props.units_list_index = 0
     except Exception:
         pass
     _dump_dir_update(self, context)
@@ -4138,7 +4145,14 @@ def register():
                 if dump_dir and hasattr(prefs, "dump_dir"):
                     # AddonPreferences の初期値と違えば上書き
                     if prefs.dump_dir != dump_dir:
-                        prefs.dump_dir = dump_dir
+                        # T016: 復元の代入で update が発火しても units を
+                        # クリアしない (フラグは try/finally で必ず戻す)
+                        global _restoring_prefs
+                        _restoring_prefs = True
+                        try:
+                            prefs.dump_dir = dump_dir
+                        finally:
+                            _restoring_prefs = False
                 if output_dir and hasattr(prefs, "output_dir"):
                     if prefs.output_dir != output_dir:
                         prefs.output_dir = output_dir
