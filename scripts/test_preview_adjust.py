@@ -2903,7 +2903,9 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
         try:
             context = types.SimpleNamespace(
                 scene=types.SimpleNamespace(headshrink_props=types.SimpleNamespace(
-                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS)),
+                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS,
+                    shrink_scale=0.65, shrink_scale_mode='UNIFORM',
+                    shrink_scale_xyz=(0.95, 0.95, 0.95))),
                 preferences=types.SimpleNamespace(addons={
                     hs.__name__: types.SimpleNamespace(
                         preferences=types.SimpleNamespace(output_dir=tmp))}))
@@ -3049,7 +3051,9 @@ class GoldenMasterTest(unittest.TestCase):
         try:
             context = types.SimpleNamespace(
                 scene=types.SimpleNamespace(headshrink_props=types.SimpleNamespace(
-                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS)),
+                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS,
+                    shrink_scale=0.65, shrink_scale_mode='UNIFORM',
+                    shrink_scale_xyz=(0.95, 0.95, 0.95))),
                 preferences=types.SimpleNamespace(addons={
                     hs.__name__: types.SimpleNamespace(
                         preferences=types.SimpleNamespace(output_dir=tmp))}))

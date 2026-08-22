@@ -963,6 +963,9 @@ def _ini_vb_replace_body(char, u):
             f"[TextureOverride{char}IB]",
             f"hash = {ib_hash}",
             "handling = skip",
+            # T015: 毎ドロー発火で $is を立てる (BodyGate はリソース再バインド
+            # 時しか発火しないためゲート間欠 → 点滅の根因)。
+            "$is = 1",
             "drawindexed = auto",
             "",
         ]
@@ -1096,6 +1099,8 @@ def _ini_ib_split_overrides(char, ib_splits, done):
             f"[TextureOverride{char}IB]",
             f"hash = {key}",
             "handling = skip",
+            # T015: 毎ドロー発火で $is を立てる (ゲート確実化)。
+            "$is = 1",
             "drawindexed = auto",
             "",
         ]
@@ -3824,6 +3829,28 @@ def _export_body_unit(obj, mesh, name, vb0, vert_count, char_name,
     return unit, vert_count
 
 
+_FACE_UI_ROLES = ('EYES', 'MOUTH', 'BROW')
+
+
+def _face_key_verts(base_verts, shrink_scale, shrink_scale_mode,
+                    shrink_scale_xyz):
+    """顔 UI ユニットの Key 頂点列 = f(Base, scale) の純スケール。
+
+    Base 自身の bbox 中心を pivot とするスケールのみで、配置移動
+    (_face_draw_to_body_space 等による頭部位置への translation) を含まない。
+    同一 VB ハッシュは同体型キャラ間で共有され、per-char 移動は cross-char
+    連鎖で破綻するため。Key は scale に依存する — 共有整合の前提として
+    キャラ間で同じ scale を使うこと。
+    """
+    s = (tuple(shrink_scale_xyz) if shrink_scale_mode == 'PER_AXIS'
+         else (shrink_scale,) * 3)
+    mins = [min(v[i] for v in base_verts) for i in range(3)]
+    maxs = [max(v[i] for v in base_verts) for i in range(3)]
+    c = [(mins[i] + maxs[i]) / 2.0 for i in range(3)]
+    return [tuple(c[i] + (b[i] - c[i]) * s[i] for i in range(3))
+            for b in base_verts]
+
+
 class NHS_OT_ExportDiff(bpy.types.Operator):
     bl_idname = "headshrink.export_diff"
     bl_label = "Mod Export"
@@ -3902,16 +3929,24 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             base_verts = [display_to_game(tuple(flat[i:i + 3]))
                           for i in range(0, len(flat), 3)]
             base_data = replace_positions(bytes(vert_count * DUMP_STRIDE), base_verts, DUMP_STRIDE)
-            key = (role, vert_count)
-            if key not in delta_cache:
-                delta_cache[key] = [(v[0] - b[0], v[1] - b[1], v[2] - b[2])
-                                    for b, v in zip(base_verts, verts)]
-            # セカンダリ (同一 role/vert_count の2個目以降) はプライマリの
-            # delta を base に加算して key を再現する。verts は配置差で
-            # ズレた preview 結果なので使わない。
-            delta = delta_cache[key]
-            key_verts = [(b[0] + d[0], b[1] + d[1], b[2] + d[2])
-                         for b, d in zip(base_verts, delta)]
+            if role in _FACE_UI_ROLES:
+                # T015: 共有顔ハッシュの Key は f(Base, scale) の純スケール
+                # (配置移動なし)。variant (extra_hash) は Base/Key を共有する
+                # ため自動的に同じ正規化が適用される。
+                key_verts = _face_key_verts(
+                    base_verts, props.shrink_scale,
+                    props.shrink_scale_mode, tuple(props.shrink_scale_xyz))
+            else:
+                key = (role, vert_count)
+                if key not in delta_cache:
+                    delta_cache[key] = [(v[0] - b[0], v[1] - b[1], v[2] - b[2])
+                                        for b, v in zip(base_verts, verts)]
+                # セカンダリ (同一 role/vert_count の2個目以降) はプライマリの
+                # delta を base に加算して key を再現する。verts は配置差で
+                # ズレた preview 結果なので使わない。
+                delta = delta_cache[key]
+                key_verts = [(b[0] + d[0], b[1] + d[1], b[2] + d[2])
+                             for b, d in zip(base_verts, delta)]
             key_data = replace_positions(base_data, key_verts, DUMP_STRIDE)
             with open(os.path.join(output_dir, f"{name}Base.buf"), 'wb') as f:
                 f.write(base_data)
