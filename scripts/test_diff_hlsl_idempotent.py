@@ -20,7 +20,11 @@ sys.modules.setdefault('bpy', bpy_teststub.bpy)
 
 import headshrink_addon as hs  # noqa: E402
 
-EPS = 1e-4
+import re
+
+# テンプレートの #define HS_EPS から自動取得 (テンプレートと模擬器の drift 防止)
+EPS = float(re.search(r'#define HS_EPS ([0-9.eE+-]+)',
+                      hs.DIFF_HLSL).group(1))
 
 
 def _f32(v):
@@ -77,13 +81,23 @@ def test_triple_apply_idempotent():
     assert rw == key
 
 
-def test_unmatched_state_noop():
-    # cur が base±6e-4 の表情変種 (base でも key でもない) -> 不変
+def test_variant_within_eps_converges_to_key():
+    # T017: cur が base±6e-4 の表情変種 (観測最大差) -> EPS=5e-3 で
+    # base と判定され key へ収束する (点滅恒久対応)
     base, key = _make_buffers()
     variant = [[b[0] + 6e-4, b[1] - 6e-4, b[2]] for b in base]
     rw = [list(v) for v in variant]
     _dispatch(rw, base, key)
-    assert rw == variant
+    assert rw == key
+
+
+def test_unmatched_state_noop():
+    # cur が base でも key でもない (EPS=5e-3 より大きくズレた状態) -> 不変
+    base, key = _make_buffers()
+    far = [[b[0] + 1e-2, b[1] - 1e-2, b[2]] for b in base]
+    rw = [list(v) for v in far]
+    _dispatch(rw, base, key)
+    assert rw == far
 
 
 def test_hlsl_template_structure():

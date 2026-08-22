@@ -685,7 +685,9 @@ DIFF_HLSL = """struct vb0 { float3 position; float3 normal; float4 tangent; };
 RWStructuredBuffer<vb0> rw_buffer : register(u1);
 StructuredBuffer<vb0> base : register(t0);
 StructuredBuffer<vb0> key : register(t1);
-#define HS_EPS 1e-4
+// T017: 観測最大 variant 差 ~6e-4 の8倍マージン。variant差>5e-3 が出たら
+// 点滅再発 → variant専用Base/Key生成へ移行すること。
+#define HS_EPS 5e-3
 [numthreads(1, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
     // Idempotent: sections sharing one bind hash must not stack deltas.
@@ -3983,7 +3985,10 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
         # IB split overrides — Draw可視 Body とペアになる IB のみに限定 (泛用、他小物は出さない)
         ib_splits_for_ini = _resolve_ib_splits_for_ini(
             _dump_cache, body_hash, char_name, prefs)
-        with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
+        # T017: テンプレに日本語コメントを含むため UTF-8 固定
+        # (既定エンコーディングの cp932 で書くと 3DMigoto 側で化ける)
+        with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w',
+                  newline='\n', encoding='utf-8') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:
             f.write(build_diff_ini(char_name, units, mode, extra_hashes, None, face_diffuse_hash, body_hash, ib_splits_for_ini))
