@@ -41,6 +41,8 @@
   - [x] Phase 4: `_preview_setup_impl` を5つの論理ブロックヘルパーへ分解 (6a64f4a)
   - [x] Phase 5: 発火抑止 globals を `_update_state` へ集約 + セクション境界コメント [1]-[8] 付与 (bb0eb2f)
   - 各 Phase 末尾で `python -m pytest scripts/test_preview_adjust.py` green (194 passed) を機械確認、1 phase = 1 commit
+  - [x] Phase 0-5 実装完了 (e08c8bc〜bb0eb2f): 198 tests green (+golden master 4件)、121本 scratch 退避、4039→3712行
+  - [x] 実機スモークテスト (2026-08-22, Kokomi): Blender 実機で Analyze Dump (口ハッシュ2種検出) → units 登録 → Auto Setup (position_vb 自動対応付け + 顔自動配置) → scale 0.65 適用 → Export Diff 成功。出力 ini 検証済み: Gate($is)=66c6fb0a / Position=dde4750a (pre-skin) / IB分割 (74900c81 → Head/Body/Dress match_first_index 0/26424/52290 + catch-all skip)。BodyPosition.buf = 13790×40B ちょうど
 - [x] T003: Blender 実機での addon 動作確認 — 2026-08-15
   - [x] addon install + import + scale + export 全通過
   - [x] 4 Blender 5.x 互換性バグ修正 (import keyword, PropertyGroup 移動, EnumProperty default, FloatVectorProperty slice)

@@ -182,3 +182,23 @@
 - フィールドでは顔 IB (0bcb587f/3049e662) が本体統合 VB def7af36 の先頭頂点 (0..1082/0..876) を参照して描画 → **統合 VB の頭部頂点縮小でフィールドの顔も一緒に縮む**
 - UI 画面 (選択/装備/図鑑) は独立 VB を使用 → 顔パーツの TextureOverride を別途生成する必要あり
 - 顔 3 パーツの縮小 = 全頂点縮小 (全て頭部領域) なので scale のみ適用、IB 分割不要
+
+## リファクタリング仕様 (2026-08-22, #081 アーキテクチャ判断済み)
+
+### 方針
+- **単一ファイル内再構成を採用。インストール機構 (launch_blender.bat 単一ファイル symlink) は凍結**
+- 理由: ①test_preview_adjust.py が `import headshrink_addon as hs` 単一モジュール前提 (Fake bpy 注入) ②病因は行数ではなく関数レベルの肥大 (extract-method で完治) ③bat 改修リスク > 分割利益
+- モジュール分割の引き金: 「6k行超え」「複数人開発」「テスト実行時間劣化」のいずれかが来た時
+- セクション契約 (明示的境界コメントで固定): [1] bl_info/imports/定数 → [2] 純関数層 (bpy非依存: dumpスキャン/数学/INI生成/hash解決/config永続化) → [3] role分類ヘルパー → [4] PropertyGroup宣言 → [5] updateコールバック (薄いアダプタのみ、本体は _impl 純関数) → [6] UIList/Prefs → [7] Operators (execute は orchestrator、ロジックは impl へ) → [8] Panel/register
+- **原則: [2][3] に bpy を持ち込まない** (将来の機械的分割可能性を保証)
+
+### やらないこと (YAGNI)
+- NHSProps の PropertyGroup 分割 — bpy property path が userpref.blend/.blend に永続化されるため全ユーザー設定喪失リスク。アクセス経路整理のみ
+- DI / Operator 抽象基底クラス / props の dataclass ミラー / プラグインレジストリ — 不要
+- 全面型ヒント付与 — 触った関数のみ
+
+### 安全策
+- Phase 3 着手前に **golden master テスト** 凍結: フィクスチャ dump に対する INI 出力と config JSON をバイト一致比較。1バイトでも変われば BLOCK
+- update コールバックのシグネチャ `(self, context)` は絶対不変 (Blender RNA 制約)。中身の抽出のみ
+- 手動スモーク checklist (Phase 3-4 ごと): Analyze Dump → Preview Setup → slider 調整 → Preview Apply → Export Diff → XXMI で mod 実確認
+- git 衛生: 1 phase = 1 commit、着手前にタグ
