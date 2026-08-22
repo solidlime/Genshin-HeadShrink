@@ -343,7 +343,7 @@ class PreviewPairTest(unittest.TestCase):
         self._orig_import = hs._import_pair
         self._orig_preview = hs._preview_setup_impl
         self._orig_path_fn = hs.face_offsets_path
-        self._orig_last = hs._last_preview_pair
+        self._orig_last = hs._update_state.last_preview_pair
         self.path = make_config_file(units={"def7af36": "BODY"})
         hs.face_offsets_path = lambda: self.path
         self.props = make_props(dump_pairs=[
@@ -356,7 +356,7 @@ class PreviewPairTest(unittest.TestCase):
         hs._import_pair = self._orig_import
         hs._preview_setup_impl = self._orig_preview
         hs.face_offsets_path = self._orig_path_fn
-        hs._last_preview_pair = self._orig_last
+        hs._update_state.last_preview_pair = self._orig_last
         if os.path.exists(self.path):
             os.unlink(self.path)
 
@@ -523,7 +523,7 @@ class DumpPairsIndexUpdateTest(unittest.TestCase):
     """_dump_pairs_index_update: 選択変更で preview_pair がスケジュールされる。"""
 
     def setUp(self):
-        self._orig_last = hs._last_preview_pair
+        self._orig_last = hs._update_state.last_preview_pair
         self._orig_register = hs.bpy.app.timers.register
         self._scheduled = []
         hs.bpy.app.timers.register = (
@@ -533,11 +533,11 @@ class DumpPairsIndexUpdateTest(unittest.TestCase):
         ])
 
     def tearDown(self):
-        hs._last_preview_pair = self._orig_last
+        hs._update_state.last_preview_pair = self._orig_last
         hs.bpy.app.timers.register = self._orig_register
 
     def test_select_schedules_preview(self):
-        hs._last_preview_pair = None
+        hs._update_state.last_preview_pair = None
         self.props.dump_pairs_index = 0
         hs._dump_pairs_index_update(self.props, None)
         self.assertEqual(len(self._scheduled), 1)
@@ -547,7 +547,7 @@ class DumpPairsIndexUpdateTest(unittest.TestCase):
         self.assertIsNone(fn())
 
     def test_same_pair_does_not_reschedule(self):
-        hs._last_preview_pair = "def7af36|aabbccdd"
+        hs._update_state.last_preview_pair = "def7af36|aabbccdd"
         self.props.dump_pairs_index = 0
         hs._dump_pairs_index_update(self.props, None)
         self.assertEqual(self._scheduled, [])

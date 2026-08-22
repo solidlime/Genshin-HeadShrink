@@ -33,7 +33,7 @@ try:
 except ImportError:
     np = None  # type: ignore[assignment]
 
-# ===== CONSTANTS =====
+# ===== [1] bl_info / imports / constants =====
 DUMP_STRIDE = 40                    # Genshin standard position stride (float3 at offset 0)
 DUMP_INDEX_BYTES = 2                # 16-bit IB only (R16_UINT)
 DUMP_COLLECTION = "HeadShrink_Dump"
@@ -41,7 +41,7 @@ DEFAULT_POSITION_VS = "653c63ba4a73ca8b"  # skinning (pointlist) pass VS hash
 
 
 
-# ===== DUMP PIPELINE (bpy-independent) =====
+# ===== [2] pure-function layer (bpy-independent: dump scan / math / INI / config) =====
 _DUMP_FRAME_RE = re.compile(r'^(\d+)-vb0=([0-9a-fA-F]+)')
 _DUMP_IB_RE = re.compile(r'^(\d+)-ib=([0-9a-fA-F]+)')
 _PS_T0_FRAME_RE = re.compile(r'^(\d+)-ps-t0=([0-9a-fA-F]+)')
@@ -674,6 +674,7 @@ def load_dump_mesh(vb0_path, ib_path, stride=DUMP_STRIDE,
 # ===== PREVIEW & COPYDISPATCH DIFF =====
 PREVIEW_COLLECTION = "HS_Preview"
 SHRINK_BOX_NAME = "HS_ShrinkBox"
+# ===== [3] role classification helpers (bpy-independent) =====
 _ROLE_TO_UNIT_NAME = {
     'BODY': 'Body',
     'EYES': 'Eyes',
@@ -855,7 +856,7 @@ def _clean_export_dir(output_dir, char_name):
     return removed
 
 
-# ===== SHRINK BOX WIREFRAME (bpy-independent) =====
+# ===== [2] shrink box wireframe (bpy-independent, continued) =====
 def box_wireframe_verts(center, half):
     """8 corners of the axis-aligned box (center ± half per axis), display coords."""
     cx, cy, cz = center
@@ -1569,6 +1570,7 @@ def apply_char_config(props, config):
     return applied
 
 
+# ===== [5] update callbacks (thin adapters; bodies in _impl functions) =====
 def _char_name_update(self, context):
     """Load the saved per-character config when the character name changes.
 
@@ -1645,10 +1647,21 @@ def select_import_pairs(pairs, units_map=None):
     return out
 
 
-# ===== PROPERTIES (stored on Scene) =====
+# ===== [4] PROPERTY GROUPS (stored on Scene) =====
 _dump_cache: dict = {'pairs': []}  # filled by NHS_OT_AnalyzeDump -> scan_dump_dir()
-_last_auto_setup_dir = None  # 直近に auto_setup を実行した dump_dir (連続発火防止)
-_last_preview_pair = None  # 直近にプレビューした dump_pair 文字列 (連続発火防止)
+
+
+class _UpdateGuardState:
+    """update コールバックの連続発火抑止 state (タイマー実行時に更新)。
+
+    last_auto_setup_dir: 直近に auto_setup を実行した dump_dir
+    last_preview_pair:   直近にプレビューした dump_pair 文字列
+    """
+    last_auto_setup_dir = None
+    last_preview_pair = None
+
+
+_update_state = _UpdateGuardState()
 
 
 def dump_pair_items(self, context):
@@ -1754,11 +1767,10 @@ def _dump_dir_update_impl(props, context):
     """dump_dir 変更時に自動セットアップを予約。
 
     bpy.ops を update コールバック内から直接呼ぶと再入するため、タイマーで
-    0.1 秒後に実行する。同一パスの連続発火は _last_auto_setup_dir で抑止
+    0.1 秒後に実行する。同一パスの連続発火は _update_state.last_auto_setup_dir で抑止
     (タイマー実行時に更新)。タイマー内 report は不安定なので例外は print。
     units 未登録のキャラでは発火しない (手動ボタンで実行)。
     """
-    global _last_auto_setup_dir
     new_dir = bpy.path.abspath(props.dump_dir)
     if not os.path.isdir(new_dir):
         return
@@ -1771,13 +1783,12 @@ def _dump_dir_update_impl(props, context):
         pass
     if not (has_file or has_list):
         return  # units 未登録(ファイルにもリストにも無し)なら自動発火しない
-    if new_dir == _last_auto_setup_dir:
+    if new_dir == _update_state.last_auto_setup_dir:
         return
 
     def _run_auto_setup():
-        global _last_auto_setup_dir
+        _update_state.last_auto_setup_dir = new_dir  # 実行時に更新 (再発火防止)
         try:
-            _last_auto_setup_dir = new_dir  # 実行時に更新 (再発火防止)
             bpy.ops.headshrink.auto_setup()
         except Exception as exc:  # タイマー内 report は不安定 → print で報告
             print(f"[HeadShrink] auto_setup failed: {exc}")
@@ -1854,20 +1865,18 @@ def _dump_pair_update(self, context):
     """dump_pair 変更時に選択ペアを即プレビュー表示 (update コールバック)。
 
     bpy.ops を update コールバック内から直接呼ぶと再入するため、タイマーで
-    0.1 秒後に実行する。同一ペアの連続発火は _last_preview_pair で抑止
+    0.1 秒後に実行する。同一ペアの連続発火は _update_state.last_preview_pair で抑止
     (タイマー実行時に更新)。タイマー内 report は不安定なので例外は print。
     """
-    global _last_preview_pair
     if not self.dump_pair or self.dump_pair == 'NONE':
         return
-    if self.dump_pair == _last_preview_pair:
+    if self.dump_pair == _update_state.last_preview_pair:
         return
     pair = self.dump_pair  # クロージャ用に値を保持 (選択が変わる可能性)
 
     def _run_preview_pair():
-        global _last_preview_pair
+        _update_state.last_preview_pair = pair  # 実行時に更新 (再発火防止)
         try:
-            _last_preview_pair = pair  # 実行時に更新 (再発火防止)
             bpy.ops.headshrink.preview_pair()
         except Exception as exc:  # タイマー内 report は不安定 → print で報告
             print(f"[HeadShrink] preview_pair failed: {exc}")
@@ -1879,23 +1888,21 @@ def _dump_pair_update(self, context):
 def _dump_pairs_index_update(self, context):
     """dump_pairs リストの選択変更で選択ペアを即プレビュー表示 (update コールバック)。
 
-    クリック / 上下キーによる選択変更ごとに発火。_last_preview_pair で同一
+    クリック / 上下キーによる選択変更ごとに発火。_update_state.last_preview_pair で同一
     ペアの連続発火を抑止し、タイマー 0.1 秒後に preview_pair を実行する
     (update 内から直接 bpy.ops を呼ぶと再入するため)。
     """
-    global _last_preview_pair
     try:
         item = self.dump_pairs[self.dump_pairs_index]
     except IndexError:  # リスト空 or index 範囲外
         return
     pair = f"{item.vb0}|{item.ib}"
-    if not item.vb0 or pair == _last_preview_pair:
+    if not item.vb0 or pair == _update_state.last_preview_pair:
         return
 
     def _run_preview_pair():
-        global _last_preview_pair
+        _update_state.last_preview_pair = pair  # 実行時に更新 (再発火防止)
         try:
-            _last_preview_pair = pair  # 実行時に更新 (再発火防止)
             bpy.ops.headshrink.preview_pair()
         except Exception as exc:  # タイマー内 report は不安定 → print で報告
             print(f"[HeadShrink] preview_pair failed: {exc}")
@@ -1920,6 +1927,7 @@ class NHSDumpPairItem(bpy.types.PropertyGroup):
     vert_count: bpy.props.IntProperty(name="Verts", default=0)
 
 
+# ===== [6] UIList / preferences =====
 class HS_UL_UnitsList(bpy.types.UIList):
     """units リストの表示 (vb0 ハッシュ + role を左右に並べる)。"""
 
@@ -2152,7 +2160,7 @@ class NHSProps(bpy.types.PropertyGroup):  # bpy.types in Blender 5.x (was bpy.pr
     )
 
 
-# ===== OPERATORS =====
+# ===== [7] operators (execute = orchestrator; logic in impl helpers) =====
 class NHS_OT_AnalyzeDump(bpy.types.Operator):
     bl_idname = "headshrink.analyze_dump"
     bl_label = "Analyze Dump"
@@ -2166,9 +2174,8 @@ class NHS_OT_AnalyzeDump(bpy.types.Operator):
             self.report({'ERROR'}, f"Dump dir not found: {dump_dir}")
             return {'CANCELLED'}
         # 再読み込み: 前回キャッシュをクリアして毎回フルスキャン
-        global _last_auto_setup_dir, _last_preview_pair
-        _last_auto_setup_dir = None
-        _last_preview_pair = None
+        _update_state.last_auto_setup_dir = None
+        _update_state.last_preview_pair = None
         _dump_cache['pairs'] = []
         _dump_cache['position_vb'] = {}
         pairs = scan_dump_dir(dump_dir)
@@ -4034,7 +4041,7 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.operator("headshrink.export_diff", icon='EXPORT')
 
 
-# ===== REGISTRATION =====
+# ===== [8] panel / register =====
 classes = (
     NHSUnitItem,
     NHSDumpPairItem,
