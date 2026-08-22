@@ -1,6 +1,10 @@
 # TODO - タスクリスト
 
 ## 優先度：高
+- [x] **T017: 点滅恒久対応 — DIFF_HLSL の HS_EPS 恒久化** — 2026-08-23 完了 (commit 5843a12、pytest 273 passed / 1 skipped。実機検証済み、詳細は SPEC「T017」節)
+  - [x] a: テンプレ定数 `#define HS_EPS 1e-4` → `5e-3` + 上限コメント (variant差>5e-3 で再発の既知上限)。drive-by: hlsl 書き出しに encoding='utf-8' 追加 (cp932 既定の文字化け防止)
+  - [x] b: golden NoelleHead.hlsl 意図的更新 (EPS 行+コメントのみ) + 冪等テストを EPS 自動取得化・variant 収束テスト更新。pytest 273 passed / 1 skipped
+  - [ ] c: 全キャラ再エクスポート (ユーザー作業。Sucrose は手動修正済みだが再エクスポートで統一)
 - [x] **T016: dump dir 再オープン時の unit リストリセット廃止** — 2026-08-23 完了 (commit a067166、pytest 272 passed / 1 skipped。詳細は SPEC「T016」節)
   - [x] a: `_dump_dir_changed` の `units_list.clear()` を「キャラが実際に変わった時だけ」に限定 (同一キャラ再オープンでは保持)
   - [x] b: register() の prefs 復元時に update 発火でリセットされないよう抑制 (`_restoring_prefs` フラグ + try/finally)
