@@ -4034,6 +4034,14 @@ class NHS_OT_SetRole(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ===== [8] panel / register =====
+def _op_pair_row(box, a_id, a_text, a_icon, b_id, b_text, b_icon):
+    """1行に2つの operator を左右に並べて描画する (パネル draw 共通)。"""
+    row = box.row()
+    row.operator(a_id, text=a_text, icon=a_icon)
+    row.operator(b_id, text=b_text, icon=b_icon)
+
+
 class NHS_PT_Panel(bpy.types.Panel):
     bl_label = "HeadShrink"
     bl_idname = "NHS_PT_panel"
@@ -4084,12 +4092,13 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.prop(props, "face_snap_enabled")
         box.operator("headshrink.reposition_faces", icon='SNAP_FACE')
         box.operator("headshrink.preview_reset", icon='LOOP_BACK')
-        row = box.row()
-        row.operator("headshrink.save_face_offsets", text="Save Char", icon='FILE_TICK')
-        row.operator("headshrink.load_char_config", text="Load Char", icon='FILE_REFRESH')
-        row = box.row()
-        row.operator("headshrink.save_default_config", text="Save Default", icon='FILE_TICK')
-        row.operator("headshrink.load_default_config", text="Load Default", icon='FILE_REFRESH')
+        # Save/Load のペア行 (Char 設定 / Default 設定) は共通ヘルパーで描画
+        _op_pair_row(box, "headshrink.save_face_offsets", "Save Char",
+                     'FILE_TICK', "headshrink.load_char_config", "Load Char",
+                     'FILE_REFRESH')
+        _op_pair_row(box, "headshrink.save_default_config", "Save Default",
+                     'FILE_TICK', "headshrink.load_default_config",
+                     "Load Default", 'FILE_REFRESH')
         box.label(text="── Shrink ──", icon='DOWNARROW_HLT')
         box.prop(props, "shrink_center")
         box.prop(props, "shrink_half")
@@ -4114,7 +4123,6 @@ class NHS_PT_Panel(bpy.types.Panel):
         box.operator("headshrink.export_diff", icon='EXPORT')
 
 
-# ===== [8] panel / register =====
 classes = (
     NHSUnitItem,
     NHSDumpPairItem,
