@@ -5,6 +5,11 @@
   - [x] P1: HLSL 生成テンプレを冪等化 — cur≈key → return / cur≈base → key 代入 / どちらでもない → 何もしない (HS_EPS=1e-4)。テンプレ変更で全キャラに効く。**既存 mod は再エクスポートが必要**
   - [x] P2: オフラインテスト scripts/test_diff_hlsl_idempotent.py 5件 (単発/二重/三重適用=1回分、未一致状態 noop、テンプレ構造ガード)。pytest 262 passed / 1 skipped、golden NoelleHead.hlsl 意図的更新
   - [x] P3: チーム編成画面のダンプ取得 → ゲートレース仮説は棄却、二重適用を実証 (Frame 234 等 NoelleMouth+SucroseMouth が同一 bind に連鎖、32件の重複 Dispatch。詳細は SPEC「口つぶれ・チーム画面隙間の解析」)
+- [ ] **T015: 点滅修正 — 共有顔ハッシュ Key 正規化 + IB ゲート** — 2026-08-22 承認済み (#081 案A、詳細は SPEC「点滅バグの解析と T015 設計判断」)。実装 commit 69a2139 + 2350777、#081 レビュー PASS、pytest 268 passed / 1 skipped
+  - [x] a: 顔 UI ユニット (目/口/眉 role + variant) の Key を f(Base, scale) 純関数化 — `_face_key_verts()` (Base を顔メッシュ自身の bbox 中心で純スケール、配置移動なし) → 全キャラ Key.buf バイト一致
+  - [x] b: IB ハッシュセクション (handling=skip) にも $is=1 ゲート追加 (`_ini_vb_replace_body` / `_ini_ib_split_overrides` の両パス。BodyGate は残置)
+  - [x] c: テスト追加 scripts/test_t015_face_key.py 6件 (Key 決定論・IB セクション $is=1・本体回帰ガード) + golden_vb_replace.ini 更新 ($is = 1 の1行のみ)
+  - [ ] d: 全キャラ再エクスポート (ユーザー作業。(a)(b)(c) 同時適用必須 — BLOCKER 制約。旧非冪等 ini が残る状態でのゲーム内点滅検証は禁止)
 - [x] **T012: v2.0.0 プレビュー配置の近似変換 + pivot/縮小中心の整理** — 設計: docs/superpowers/specs/2026-08-17-headshrink-v2-design.md (承認済み)
   - [x] 顔メッシュ配置: `_face_draw_to_body_space(face_mesh, body_draw_verts, body_pos_verts)` 新規 (最近傍スキニング変位加算、境界ペアの位置差中央値で loc 算出)。`_preview_setup_impl` で BODY が position_vb 空間のとき本変換で配置 (head_center - face_center から置換)。BODY draw_vb 頂点はダンプから読込 (game_to_display)
   - [x] pivot = box 中央固定: `_auto_face_pivot` 自動設定削除、`_preview_props_update` / `NHS_OT_PreviewApply` の origin = shrink_center、UI の shrink_origin 行削除 (プロパティは互換残置)
