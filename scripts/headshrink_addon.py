@@ -905,6 +905,201 @@ def box_center_from_obj(obj):
 # のように書く (dump_scan.py が同一vert_countの別hash候補を提示する)。
 
 
+def _ini_gate(body_hash, face_diffuse_hash, vb_ps_t0):
+    """effieface式 $is ゲートの (hash, section名) を解決する。
+
+    body_hash 優先、無ければ face_diffuse_hash フォールバック、
+    vb_ps_t0 は deprecated (旧 per-draw ps-t0 gating)。
+    """
+    if body_hash:
+        return str(body_hash).lower()[:8], "BodyGate"
+    if face_diffuse_hash:
+        return str(face_diffuse_hash).lower()[:8], "FaceDiffuse"
+    if vb_ps_t0:
+        return str(vb_ps_t0).lower()[:8], "BodyGate"
+    return None, "BodyGate"
+
+
+def _ini_vb_replace_body(char, u):
+    """VB_REPLACE mode の BODY unit 1個分の ini ブロック。"""
+    n = u['name']
+    ib_hash = u.get('ib') or u.get('ib_hash')
+    splits = u.get('ib_splits')
+    has_split = bool(ib_hash and splits and len(splits) >= 2)
+    # Lan Yan など IB 分割方式では Position と IB Body が同名で衝突するため
+    # Position の TextureOverride 名を charPosition に退避しつつ
+    # Resource/ファイルは従来の n (=charBody) のままにして ExportDiff の
+    # 書き出し (namePosition.buf) と一致させる
+    pos_override = f"{char}Position" if has_split else n
+    pos_resource = n
+    parts = [
+        f"[TextureOverride{pos_override}]",
+        # IB分割キャラは pre-skin (SO) hash を置換 (drawn hash だと
+        # モデルローカル座標で上書きしてアニメ停止+体消滅する)
+        f"hash = {u.get('position_hash') or u['vb_hash']}",
+        f"vb0 = Resource{pos_resource}Position",
+        "$is = 1",
+        "",
+        f"[Resource{pos_resource}Position]",
+        "type = Buffer",
+        f"stride = {DUMP_STRIDE}",
+        f"filename = {pos_resource}Position.buf",
+        "",
+    ]
+    # IB match_first_index split (e.g. Lan Yan 1066a76c: Head 0 / Body 41385 / Dress 85527)
+    # 補助: u に ib / ib_splits があれば Head/Body/Dress の 3分割を出力
+    if has_split:
+        # キャッチオール: match_first_index に掛からない Body/Dress の
+        # DrawIndexed がスライスIB範囲外を読むのを防ぐ (LanYanMod 実証済み)
+        parts += [
+            f"[TextureOverride{char}IB]",
+            f"hash = {ib_hash}",
+            "handling = skip",
+            "drawindexed = auto",
+            "",
+        ]
+        splits_sorted = sorted(splits)[:3]
+        part_names = ['Head', 'Body', 'Dress']
+        for idx, (first, cnt) in enumerate(splits_sorted):
+            part = part_names[idx]
+            res_name = f"{char}{part}"
+            # 同一 char で複数 BODY が無い想定、重複は呼び出し側でユニーク化済み
+            parts += [
+                f"[TextureOverride{res_name}]",
+                f"hash = {ib_hash}",
+                f"match_first_index = {first}",
+                f"ib = Resource{res_name}IB",
+                "",
+                f"[Resource{res_name}IB]",
+                "type = Buffer",
+                "format = DXGI_FORMAT_R32_UINT",
+                f"filename = {res_name}.ib",
+                "",
+            ]
+    return parts
+
+
+def _ini_unit_block(n, vb_hash, vert_count, char, use_is):
+    """[TextureOverride]〜[CustomShader] までの共通ブロック ($is ゲート差分のみ)。"""
+    head = (
+        [
+            f"[TextureOverride{n}]",
+            f"hash = {vb_hash}",
+            "if $is",
+            "$is = 1",
+            f"run = CommandList{n}",
+            "endif",
+            "",
+        ] if use_is else
+        [
+            f"[TextureOverride{n}]",
+            f"hash = {vb_hash}",
+            "$is = 1",
+            f"run = CommandList{n}",
+            "",
+        ])
+    return head + [
+        f"[CommandList{n}]",
+        f"Resource{n}Dif = copy this",
+        f"run = CustomShader{n}",
+        f"this = Resource{n}Dif",
+        "",
+        f"[Resource{n}Dif]",
+        "",
+        f"[Resource{n}Base]",
+        "type = RWBuffer",
+        f"stride = {DUMP_STRIDE}",
+        f"filename = {n}Base.buf",
+        "",
+        f"[Resource{n}Key]",
+        "type = RWBuffer",
+        f"stride = {DUMP_STRIDE}",
+        f"filename = {n}Key.buf",
+        "",
+        f"[CustomShader{n}]",
+        f"cs = {char}Head.hlsl",
+        "",
+        f"cs-u1 = copy Resource{n}Dif",
+        f"cs-t0 = copy Resource{n}Base",
+        f"cs-t1 = copy Resource{n}Key",
+        "",
+        f"Dispatch = {vert_count}, 1, 1",
+        f"Resource{n}Dif = copy cs-u1",
+        "post cs-u1 = null",
+        "",
+    ]
+
+
+def _ini_extra_hash_block(n, h, vert_count, char, use_is):
+    """追加hash unit 1個分のブロック (元unitの Base/Key を共有)。"""
+    head = (
+        [
+            f"[TextureOverride{n}_{h}]",
+            f"hash = {h}",
+            "if $is",
+            "$is = 1",
+            f"run = CommandList{n}_{h}",
+            "endif",
+            "",
+        ] if use_is else
+        [
+            f"[TextureOverride{n}_{h}]",
+            f"hash = {h}",
+            "$is = 1",
+            f"run = CommandList{n}_{h}",
+            "",
+        ])
+    return head + [
+        f"[CommandList{n}_{h}]",
+        f"Resource{n}_{h}Dif = copy this",
+        f"run = CustomShader{n}_{h}",
+        f"this = Resource{n}_{h}Dif",
+        "",
+        f"[Resource{n}_{h}Dif]",
+        "",
+        f"[CustomShader{n}_{h}]",
+        f"cs = {char}Head.hlsl",
+        "",
+        f"cs-u1 = copy Resource{n}_{h}Dif",
+        f"cs-t0 = copy Resource{n}Base",
+        f"cs-t1 = copy Resource{n}Key",
+        "",
+        f"Dispatch = {vert_count}, 1, 1",
+        f"Resource{n}_{h}Dif = copy cs-u1",
+        "post cs-u1 = null",
+        "",
+    ]
+
+
+def _ini_ib_split_overrides(char, ib_splits, done):
+    """units 未処理の IB split overrides ブロック (fallback 用)。"""
+    parts = []
+    for ib_hash, splits in ib_splits.items():
+        key = str(ib_hash).lower()[:8]
+        if key in done:
+            continue
+        norm = []
+        for e in splits:
+            if isinstance(e, (list, tuple)):
+                norm.append((int(e[0]), int(e[1]) if len(e) > 1 else 0))
+            else:
+                norm.append((int(e), 0))
+        parts += [
+            f"[TextureOverride{char}IB]",
+            f"hash = {key}",
+            "handling = skip",
+            "drawindexed = auto",
+            "",
+        ]
+        for idx, (first, _c) in enumerate(sorted(norm)[:3]):
+            part = ['Head', 'Body', 'Dress'][idx]
+            res = f"{char}{part}"
+            # 重複防止: 同一charで複数IBが来てもセクション名が衝突しないようhashサフィックス
+            uniq = f"{res}_{key}"
+            parts += [f"[TextureOverride{uniq}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{uniq}IB", "", f"[Resource{uniq}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {uniq}.ib", ""]
+    return parts
+
+
 def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=None, face_diffuse_hash=None, body_hash=None, ib_splits=None):
     """units: [{name(char+Unit), vb_hash, vert_count, role?}] -> ini text.
 
@@ -936,17 +1131,7 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     # effieface式: $is を global/post で初期化 (BodyGate専用)
     parts = ["[Constants]", "global $is = 0", "", "[Present]", "post $is = 0", ""]
     # body優先、無ければ faceDiffuseフォールバック (body_hashは ExportDiffが units内BODYから供給)
-    gate_hash = None
-    gate_name = "BodyGate"
-    if body_hash:
-        gate_hash = str(body_hash).lower()[:8]
-        gate_name = "BodyGate"
-    elif face_diffuse_hash:
-        gate_hash = str(face_diffuse_hash).lower()[:8]
-        gate_name = "FaceDiffuse"
-    elif vb_ps_t0:
-        gate_hash = str(vb_ps_t0).lower()[:8]
-        gate_name = "BodyGate"
+    gate_hash, gate_name = _ini_gate(body_hash, face_diffuse_hash, vb_ps_t0)
     if gate_hash:
         parts += [
             f"[TextureOverride{gate_name}]",
@@ -958,220 +1143,20 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     for u in units:
         n = u['name']
         if mode == 'VB_REPLACE' and u.get('role') == 'BODY':
-            ib_hash = u.get('ib') or u.get('ib_hash')
-            splits = u.get('ib_splits')
-            has_split = bool(ib_hash and splits and len(splits) >= 2)
-            # Lan Yan など IB 分割方式では Position と IB Body が同名で衝突するため
-            # Position の TextureOverride 名を charPosition に退避しつつ
-            # Resource/ファイルは従来の n (=charBody) のままにして ExportDiff の
-            # 書き出し (namePosition.buf) と一致させる
-            pos_override = f"{char}Position" if has_split else n
-            pos_resource = n
-            parts += [
-                f"[TextureOverride{pos_override}]",
-                # IB分割キャラは pre-skin (SO) hash を置換 (drawn hash だと
-                # モデルローカル座標で上書きしてアニメ停止+体消滅する)
-                f"hash = {u.get('position_hash') or u['vb_hash']}",
-                f"vb0 = Resource{pos_resource}Position",
-                "$is = 1",
-                "",
-                f"[Resource{pos_resource}Position]",
-                "type = Buffer",
-                f"stride = {DUMP_STRIDE}",
-                f"filename = {pos_resource}Position.buf",
-                "",
-            ]
-            # IB match_first_index split (e.g. Lan Yan 1066a76c: Head 0 / Body 41385 / Dress 85527)
-            # 補助: u に ib / ib_splits があれば Head/Body/Dress の 3分割を出力
-            if has_split:
-                # キャッチオール: match_first_index に掛からない Body/Dress の
-                # DrawIndexed がスライスIB範囲外を読むのを防ぐ (LanYanMod 実証済み)
-                parts += [
-                    f"[TextureOverride{char}IB]",
-                    f"hash = {ib_hash}",
-                    "handling = skip",
-                    "drawindexed = auto",
-                    "",
-                ]
-                splits_sorted = sorted(splits)[:3]
-                part_names = ['Head', 'Body', 'Dress']
-                for idx, (first, cnt) in enumerate(splits_sorted):
-                    part = part_names[idx]
-                    res_name = f"{char}{part}"
-                    # 同一 char で複数 BODY が無い想定、重複は呼び出し側でユニーク化済み
-                    parts += [
-                        f"[TextureOverride{res_name}]",
-                        f"hash = {ib_hash}",
-                        f"match_first_index = {first}",
-                        f"ib = Resource{res_name}IB",
-                        "",
-                        f"[Resource{res_name}IB]",
-                        "type = Buffer",
-                        "format = DXGI_FORMAT_R32_UINT",
-                        f"filename = {res_name}.ib",
-                        "",
-                    ]
+            parts += _ini_vb_replace_body(char, u)
             continue
         # effieface式 $is ゲート: BODY は VB置換のトリガーなので対象外、face系のみ if $is
-        _use_is = bool(gate_hash and u.get('role') != 'BODY')
-        if _use_is:
-            parts += [
-                f"[TextureOverride{n}]",
-                f"hash = {u['vb_hash']}",
-                "if $is",
-                "$is = 1",
-                f"run = CommandList{n}",
-                "endif",
-                "",
-                f"[CommandList{n}]",
-                f"Resource{n}Dif = copy this",
-                f"run = CustomShader{n}",
-                f"this = Resource{n}Dif",
-                "",
-                f"[Resource{n}Dif]",
-                "",
-                f"[Resource{n}Base]",
-                "type = RWBuffer",
-                f"stride = {DUMP_STRIDE}",
-                f"filename = {n}Base.buf",
-                "",
-                f"[Resource{n}Key]",
-                "type = RWBuffer",
-                f"stride = {DUMP_STRIDE}",
-                f"filename = {n}Key.buf",
-                "",
-                f"[CustomShader{n}]",
-                f"cs = {char}Head.hlsl",
-                "",
-                f"cs-u1 = copy Resource{n}Dif",
-                f"cs-t0 = copy Resource{n}Base",
-                f"cs-t1 = copy Resource{n}Key",
-                "",
-                f"Dispatch = {u['vert_count']}, 1, 1",
-                f"Resource{n}Dif = copy cs-u1",
-                "post cs-u1 = null",
-                "",
-            ]
-        else:
-            parts += [
-                f"[TextureOverride{n}]",
-                f"hash = {u['vb_hash']}",
-                "$is = 1",
-                f"run = CommandList{n}",
-                "",
-                f"[CommandList{n}]",
-                f"Resource{n}Dif = copy this",
-                f"run = CustomShader{n}",
-                f"this = Resource{n}Dif",
-                "",
-                f"[Resource{n}Dif]",
-                "",
-                f"[Resource{n}Base]",
-                "type = RWBuffer",
-                f"stride = {DUMP_STRIDE}",
-                f"filename = {n}Base.buf",
-                "",
-                f"[Resource{n}Key]",
-                "type = RWBuffer",
-                f"stride = {DUMP_STRIDE}",
-                f"filename = {n}Key.buf",
-                "",
-                f"[CustomShader{n}]",
-                f"cs = {char}Head.hlsl",
-                "",
-                f"cs-u1 = copy Resource{n}Dif",
-                f"cs-t0 = copy Resource{n}Base",
-                f"cs-t1 = copy Resource{n}Key",
-                "",
-                f"Dispatch = {u['vert_count']}, 1, 1",
-                f"Resource{n}Dif = copy cs-u1",
-                "post cs-u1 = null",
-                "",
-            ]
+        use_is = bool(gate_hash and u.get('role') != 'BODY')
+        parts += _ini_unit_block(n, u['vb_hash'], u['vert_count'], char, use_is)
         # 追加hash: 元unitの Base/Key を共有 (cs-t0/cs-t1 は元unitの
         # Resource を参照、Dispatch は同一 vert_count)。
         for h in (extra_hashes or {}).get(u.get('role'), []):
             if h in existing_hashes:
                 continue
-            if _use_is:
-                parts += [
-                    f"[TextureOverride{n}_{h}]",
-                    f"hash = {h}",
-                    "if $is",
-                    "$is = 1",
-                    f"run = CommandList{n}_{h}",
-                    "endif",
-                    "",
-                    f"[CommandList{n}_{h}]",
-                    f"Resource{n}_{h}Dif = copy this",
-                    f"run = CustomShader{n}_{h}",
-                    f"this = Resource{n}_{h}Dif",
-                    "",
-                    f"[Resource{n}_{h}Dif]",
-                    "",
-                    f"[CustomShader{n}_{h}]",
-                    f"cs = {char}Head.hlsl",
-                    "",
-                    f"cs-u1 = copy Resource{n}_{h}Dif",
-                    f"cs-t0 = copy Resource{n}Base",
-                    f"cs-t1 = copy Resource{n}Key",
-                    "",
-                    f"Dispatch = {u['vert_count']}, 1, 1",
-                    f"Resource{n}_{h}Dif = copy cs-u1",
-                    "post cs-u1 = null",
-                    "",
-                ]
-            else:
-                parts += [
-                    f"[TextureOverride{n}_{h}]",
-                    f"hash = {h}",
-                    "$is = 1",
-                    f"run = CommandList{n}_{h}",
-                    "",
-                    f"[CommandList{n}_{h}]",
-                    f"Resource{n}_{h}Dif = copy this",
-                    f"run = CustomShader{n}_{h}",
-                    f"this = Resource{n}_{h}Dif",
-                    "",
-                    f"[Resource{n}_{h}Dif]",
-                    "",
-                    f"[CustomShader{n}_{h}]",
-                    f"cs = {char}Head.hlsl",
-                    "",
-                    f"cs-u1 = copy Resource{n}_{h}Dif",
-                    f"cs-t0 = copy Resource{n}Base",
-                    f"cs-t1 = copy Resource{n}Key",
-                    "",
-                     f"Dispatch = {u['vert_count']}, 1, 1",
-                    f"Resource{n}_{h}Dif = copy cs-u1",
-                    "post cs-u1 = null",
-                    "",
-                  ]
+            parts += _ini_extra_hash_block(n, h, u['vert_count'], char, use_is)
     if ib_splits:
         done = {str((u.get('ib') or u.get('ib_hash') or '')).lower()[:8] for u in units if u.get('ib_splits')}
-        for ib_hash, splits in ib_splits.items():
-            key = str(ib_hash).lower()[:8]
-            if key in done:
-                continue
-            norm = []
-            for e in splits:
-                if isinstance(e, (list, tuple)):
-                    norm.append((int(e[0]), int(e[1]) if len(e) > 1 else 0))
-                else:
-                    norm.append((int(e), 0))
-            parts += [
-                f"[TextureOverride{char}IB]",
-                f"hash = {key}",
-                "handling = skip",
-                "drawindexed = auto",
-                "",
-            ]
-            for idx, (first, _c) in enumerate(sorted(norm)[:3]):
-                part = ['Head', 'Body', 'Dress'][idx]
-                res = f"{char}{part}"
-                # 重複防止: 同一charで複数IBが来てもセクション名が衝突しないようhashサフィックス
-                uniq = f"{res}_{key}"
-                parts += [f"[TextureOverride{uniq}]", f"hash = {key}", f"match_first_index = {first}", f"ib = Resource{uniq}IB", "", f"[Resource{uniq}IB]", "type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {uniq}.ib", ""]
+        parts += _ini_ib_split_overrides(char, ib_splits, done)
     return "\n".join(parts)
 
 
@@ -3508,6 +3493,281 @@ class NHS_OT_LoadDefaultConfig(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _scan_drawn_buf_hash(scan_dir, drawn_set, vert_count):
+    """drawn_set に含まれ vert_count 同頂点数の .buf hash を走査して返す。
+
+    FrameAnalysis の -N=<hash>.buf 命名と deduped/<hash8>.buf の両方に対応。
+    見つからなければ None。
+    """
+    if not scan_dir or not os.path.isdir(scan_dir):
+        return None
+    for root2, _, files2 in os.walk(scan_dir):
+        for fn2 in files2:
+            if not fn2.lower().endswith('.buf'):
+                continue
+            m2 = _DUMP_FRAME_RE.match(fn2)
+            if m2:
+                hh = m2.group(2).lower()[:8]
+            elif os.path.basename(root2) == 'deduped':
+                hh = os.path.splitext(fn2)[0].lower()
+                if len(hh) != 8:
+                    continue
+            else:
+                continue
+            if hh not in drawn_set:
+                continue
+            p2 = os.path.join(root2, fn2)
+            try:
+                vc2 = os.path.getsize(p2) // DUMP_STRIDE
+            except OSError:
+                continue
+            if vc2 == vert_count:
+                return hh
+    return None
+
+
+def _find_drawn_alt_hash(dump_cache, dump_hash, body_vc, scan_dir):
+    """SO-only hash -> Draw可視 hash 統一: position_vb 内→dump 走査の順で探索。"""
+    drawn_set = dump_cache.get('drawn_vb0') or set()
+    if not (dump_hash and drawn_set and dump_hash.lower()[:8] not in drawn_set):
+        return None
+    # まず position_vb 内の drawn エントリ
+    for h2, info2 in (dump_cache.get('position_vb') or {}).items():
+        if h2.lower()[:8] in drawn_set and info2.get('vert_count') == body_vc \
+                and h2.lower()[:8] != dump_hash.lower()[:8]:
+            return h2
+    # 同 vert_count の Draw可視 hash を dump_dir から探索
+    try:
+        scan_dir = os.path.abspath(scan_dir) if scan_dir else ''
+    except Exception:
+        scan_dir = ''
+    return _scan_drawn_buf_hash(scan_dir, drawn_set, body_vc)
+
+
+def _resolve_body_gate_hash(units, dump_cache, char_name, prefs):
+    """$is ゲート用 BODY hash を解決する。
+
+    Drawフィルター: SO-only hash は除外し Draw可視 hash を優先。
+    無ければ faceDiffuse にフォールバック、どちらも無ければゲート無し。
+    戻り値: (body_hash, face_diffuse_hash)
+    """
+    body_hash = next((u['vb_hash'] for u in units if u.get('role') == 'BODY'), None)
+    drawn_for_gate = dump_cache.get('drawn_vb0') or set()
+    if body_hash and drawn_for_gate and body_hash.lower()[:8] not in drawn_for_gate:
+        body_vc = next((u['vert_count'] for u in units if u.get('role') == 'BODY'), None)
+        if body_vc:
+            # scan for a drawn vb0 with same vert_count (e.g. Mizuki e36be83b 22226)
+            scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+            if scan_dir:
+                try:
+                    scan_dir = os.path.abspath(scan_dir) if hasattr(scan_dir, 'lower') else str(scan_dir)
+                except Exception:
+                    pass
+                alt = _scan_drawn_buf_hash(scan_dir, drawn_for_gate, body_vc)
+                if alt:
+                    body_hash = alt
+    face_diffuse_hash = None
+    if not body_hash:
+        face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
+        face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
+    return body_hash, face_diffuse_hash
+
+
+def _resolve_ib_splits_for_ini(dump_cache, body_hash, char_name, prefs):
+    """ini 用 IB split overrides を解決する (Draw可視 Body とペアの IB のみ)。"""
+    raw_splits = dump_cache.get('ib_splits') or {}
+    if not (_has_ib_split(raw_splits) and body_hash):
+        # Body無しキャラでは外部IBは出さない(重複防止)、fallback も出さない
+        return None
+    scan_dir3 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+    try:
+        scan_dir3 = os.path.abspath(scan_dir3) if scan_dir3 else ''
+    except Exception:
+        scan_dir3 = ''
+    paired3 = _find_paired_ibs(scan_dir3, body_hash) if scan_dir3 else set()
+    if paired3:
+        filtered = {k: v for k, v in raw_splits.items() if k in paired3}
+        if filtered and any(len(v) >= 2 for v in filtered.values()):
+            return filtered
+    # fallback: when pairing fails (old dump without vs/ps), pass nothing to avoid 12重複爆殖
+    return None
+
+
+def _reclassify_dup_as_extra(role, vb0, vert_count, primary_for_key,
+                             extra_hashes, units):
+    """同一 (role, vert_count) の2個目以降を extra_hash へ再分類したら True。
+
+    冗長排除: 別primaryとしてBase/Keyを作らず primary の delta を共有する
+    (Noelle d265427c と同様)。BODY は対象外。
+    """
+    if role == 'BODY':
+        return False
+    if (role, vert_count) not in primary_for_key:
+        return False
+    lst = extra_hashes.setdefault(role, [])
+    if vb0 not in lst and vb0 not in {u['vb_hash'] for u in units}:
+        lst.append(vb0)
+    return True
+
+
+def _export_body_unit(obj, mesh, name, vb0, vert_count, char_name,
+                      output_dir, props, prefs, report):
+    """VB_REPLACE BODY unit: <name>Position.buf (+IB分割 .ib) を書き出す。
+
+    成功時は (unit_dict, vert_count) を返す (偽Bodyでは正規カウントに上書き)。
+    失敗時は report して None を返す (呼び出し側は {'CANCELLED'})。
+    """
+    # IB分割汎用: 偽Bodyプレビューなら position_vb の正規カウントで
+    # BodyPosition.buf を生成 (偽の vb0 は export に使わない)
+    is_fake = bool(obj.get('hs_is_fake_body'))
+    if not is_fake and _has_ib_split(_dump_cache.get('ib_splits') or {}):
+        # units_map に偽Bodyが登録された場合も generic に検出
+        if _is_fake_body_pair({'vb0': vb0, 'vert_count': vert_count}, _dump_cache):
+            is_fake = True
+    position_vb = None
+    dump_hash = None
+    dump_path = None
+    pv_verts = None
+    position_hash = None
+    if is_fake:
+        # 正規の position_vb (例 28247) を使う
+        real = None
+        rh = obj.get('hs_real_position_vb')
+        if rh:
+            real = (_dump_cache.get('position_vb') or {}).get(rh)
+            if real:
+                real = {'vb_hash': rh, 'path': real['path'], 'vert_count': real['vert_count']}
+        if real is None:
+            real = _find_real_position_vb(_dump_cache.get('position_vb') or {})
+        if real is None:
+            real = _dump_cache.get('real_position_vb')
+        if real is None:
+            report({'ERROR'}, f"{name}: IB-split fake Body but real position_vb not found. Re-dump and re-run Analyze Dump.")
+            return None
+        position_vb = real
+        dump_hash = real['vb_hash']
+        dump_path = real['path']
+        # 偽Bodyは正規 position_vb (pre-skin) を既に使っている
+        position_hash = dump_hash
+        # 偽メッシュは 220k 等で大きいため正規カウントでスライス
+        all_pv = [display_to_position_vb(tuple(v.co)) for v in mesh.vertices]
+        rv = real['vert_count']
+        if len(all_pv) >= rv:
+            pv_verts = all_pv[:rv]
+        else:
+            pv_verts = all_pv + [(0.0, 0.0, 0.0)] * (rv - len(all_pv))
+        # unit vert_count は正規のカウントで上書き
+        vert_count = rv
+    else:
+        # 通常: pre-skin position buffer (same vertex count)
+        position_vb = find_position_vb(
+            _dump_cache, vb0, vert_count)
+        if position_vb is None:
+            report({'ERROR'}, f"{name}: pre-skin position_vb for "
+                                   f"{vb0} not found (skinning "
+                                   f"vs={props.position_vs}). The dump "
+                                   f"lacks the skinning pass vb0; "
+                                   f"re-dump and re-run Analyze Dump.")
+            return None
+        dump_hash = position_vb['vb_hash']
+        dump_path = position_vb['path']
+        # SO-only hash (bbdaf598) -> Draw hash (e36be83b) 統一: log.txt Draw 出現で汎用的に
+        alt = _find_drawn_alt_hash(
+            _dump_cache, dump_hash, position_vb.get('vert_count'),
+            char_dump_dir(char_name) or getattr(prefs, 'dump_dir', ''))
+        if alt:
+            dump_hash = alt
+        # IB分割キャラ: Position 置換 hash は pre-skin (SO) バッファ。
+        # drawn hash (post-skin) を置換するとモデルローカル座標で
+        # 上書きしてアニメ停止+体消滅する (実証済み)。BodyGate は
+        # drawn のまま維持するため units には position_hash を別持つ。
+        position_hash = dump_hash
+        if _has_ib_split(_dump_cache.get('ib_splits') or {}):
+            pv = find_position_vb(
+                _dump_cache, vb0, vert_count, drawn_filter=False)
+            if pv:
+                position_hash = pv['vb_hash']
+        pv_verts = [display_to_position_vb(tuple(v.co))
+                    for v in mesh.vertices]
+    # Bennett-mimic: overwrite only the position float3 of
+    # the real pre-skin vb0. normal/tangent stay from the
+    # dump; the game VS re-skins the new positions, so the
+    # body follows animations exactly.
+    with open(dump_path, 'rb') as f:
+        dump_bytes = f.read()
+    pos_data = build_position_buf(dump_bytes, pv_verts)
+    with open(os.path.join(output_dir, f"{name}Position.buf"),
+              'wb') as f:
+        f.write(pos_data)
+    # IB match_first_index split — Draw可視 Body と同フレーム・同vs/psでペアになる IB のみに限定 (泛用)
+    ib_hash = None
+    ib_splits = None
+    try:
+        splits_map = _dump_cache.get('ib_splits') or {}
+        if splits_map and dump_hash:
+            # Body の Draw可視 hash とペアになる IB のみに絞る
+            scan_dir2 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
+            try:
+                scan_dir2 = os.path.abspath(scan_dir2) if scan_dir2 else ''
+            except Exception:
+                scan_dir2 = ''
+            paired = _find_paired_ibs(scan_dir2, dump_hash) if scan_dir2 else set()
+            # paired が空なら fallback で絞らず(過去キャラ互換)、あるなら絞る
+            cand_map = {k: v for k, v in splits_map.items() if k in paired} if paired else splits_map
+            best = None
+            best_total = -1
+            for kh, sp in cand_map.items():
+                if len(sp) >= 2:
+                    tot = sum(c for _, c in sp)
+                    if tot > best_total:
+                        best_total = tot
+                        best = (kh, sp)
+            if best:
+                ib_hash, ib_splits = best
+    except Exception:
+        pass
+    # IB ファイルを R32 で書き出し (INI の Resource と対応)
+    if ib_hash and ib_splits:
+        dump_dir_for_ib = getattr(prefs, 'dump_dir', '')
+        try:
+            dump_dir_for_ib = bpy.path.abspath(dump_dir_for_ib) if dump_dir_for_ib else ''
+        except Exception:
+            pass
+        ib_path = _find_ib_path(dump_dir_for_ib, ib_hash) if dump_dir_for_ib else ''
+        if ib_path and os.path.exists(ib_path):
+            try:
+                with open(ib_path, 'rb') as f:
+                    ib_data = f.read()
+                for idx2, (first2, cnt2) in enumerate(sorted(ib_splits)[:3]):
+                    part2 = ['Head', 'Body', 'Dress'][idx2]
+                    res_name2 = f"{char_name}{part2}"
+                    s = first2 * DUMP_INDEX_BYTES
+                    e = (first2 + cnt2) * DUMP_INDEX_BYTES
+                    sl = ib_data[s:e]
+                    if sl:
+                        # R16 -> R32
+                        n = len(sl) // DUMP_INDEX_BYTES
+                        try:
+                            indices = struct.unpack(f'<{n}H', sl)
+                            sl = struct.pack(f'<{n}I', *indices)
+                        except Exception:
+                            pass
+                        with open(os.path.join(output_dir, f"{res_name2}.ib"), 'wb') as outf:
+                            outf.write(sl)
+            except Exception:
+                pass
+    if ib_hash and ib_splits:
+        unit = {'name': name, 'vb_hash': dump_hash,
+                'position_hash': position_hash,
+                'vert_count': vert_count, 'role': 'BODY',
+                'ib': ib_hash, 'ib_splits': ib_splits}
+    else:
+        unit = {'name': name, 'vb_hash': dump_hash,
+                'position_hash': position_hash,
+                'vert_count': vert_count, 'role': 'BODY'}
+    return unit, vert_count
+
+
 class NHS_OT_ExportDiff(bpy.types.Operator):
     bl_idname = "headshrink.export_diff"
     bl_label = "Mod Export"
@@ -3553,11 +3813,8 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             vert_count = len(mesh.vertices)
             role = obj.get('hs_role', 'OTHER')
             # 7a73d3b5 冗長排除: 同一 (role, vert_count) の2個目以降は extra へ
-            _dup_key = (role, vert_count)
-            if role != 'BODY' and _dup_key in primary_for_key:
-                lst = extra_hashes.setdefault(role, [])
-                if vb0 not in lst and vb0 not in {u['vb_hash'] for u in units}:
-                    lst.append(vb0)
+            if _reclassify_dup_as_extra(role, vb0, vert_count,
+                                        primary_for_key, extra_hashes, units):
                 continue
             unit = unit_name_for_role(role, vb0)
             # 同名ユニット (例: MOUTH がプライマリ+セカンダリで2つ) は
@@ -3571,192 +3828,13 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             # because preview_shrink_mesh writes back local coords.
             verts = [display_to_game(tuple(v.co)) for v in mesh.vertices]
             if mode == 'VB_REPLACE' and role == 'BODY':
-                # IB分割汎用: 偽Bodyプレビューなら position_vb の正規カウントで
-                # BodyPosition.buf を生成 (偽の vb0 は export に使わない)
-                is_fake = bool(obj.get('hs_is_fake_body'))
-                if not is_fake and _has_ib_split(_dump_cache.get('ib_splits') or {}):
-                    # units_map に偽Bodyが登録された場合も generic に検出
-                    if _is_fake_body_pair({'vb0': vb0, 'vert_count': vert_count}, _dump_cache):
-                        is_fake = True
-                position_vb = None
-                dump_hash = None
-                dump_path = None
-                pv_verts = None
-                position_hash = None
-                if is_fake:
-                    # 正規の position_vb (例 28247) を使う
-                    real = None
-                    rh = obj.get('hs_real_position_vb')
-                    if rh:
-                        real = (_dump_cache.get('position_vb') or {}).get(rh)
-                        if real:
-                            real = {'vb_hash': rh, 'path': real['path'], 'vert_count': real['vert_count']}
-                    if real is None:
-                        real = _find_real_position_vb(_dump_cache.get('position_vb') or {})
-                    if real is None:
-                        real = _dump_cache.get('real_position_vb')
-                    if real is None:
-                        self.report({'ERROR'}, f"{name}: IB-split fake Body but real position_vb not found. Re-dump and re-run Analyze Dump.")
-                        return {'CANCELLED'}
-                    position_vb = real
-                    dump_hash = real['vb_hash']
-                    dump_path = real['path']
-                    # 偽Bodyは正規 position_vb (pre-skin) を既に使っている
-                    position_hash = dump_hash
-                    # 偽メッシュは 220k 等で大きいため正規カウントでスライス
-                    all_pv = [display_to_position_vb(tuple(v.co)) for v in mesh.vertices]
-                    rv = real['vert_count']
-                    if len(all_pv) >= rv:
-                        pv_verts = all_pv[:rv]
-                    else:
-                        pv_verts = all_pv + [(0.0, 0.0, 0.0)] * (rv - len(all_pv))
-                    # unit vert_count は正規のカウントで上書き
-                    vert_count = rv
-                else:
-                    # 通常: pre-skin position buffer (same vertex count)
-                    position_vb = find_position_vb(
-                        _dump_cache, vb0, vert_count)
-                    if position_vb is None:
-                        self.report({'ERROR'}, f"{name}: pre-skin position_vb for "
-                                               f"{vb0} not found (skinning "
-                                               f"vs={props.position_vs}). The dump "
-                                               f"lacks the skinning pass vb0; "
-                                               f"re-dump and re-run Analyze Dump.")
-                        return {'CANCELLED'}
-                    dump_hash = position_vb['vb_hash']
-                    dump_path = position_vb['path']
-                    # SO-only hash (bbdaf598) -> Draw hash (e36be83b) 統一: log.txt Draw 出現で汎用的に
-                    drawn_set = _dump_cache.get('drawn_vb0') or set()
-                    if dump_hash and drawn_set and dump_hash.lower()[:8] not in drawn_set:
-                        # 同 vert_count の Draw可視 hash を dump_dir から探索
-                        body_vc = position_vb.get('vert_count')
-                        alt = None
-                        # まず position_vb 内の drawn エントリ
-                        for h2, info2 in (_dump_cache.get('position_vb') or {}).items():
-                            if h2.lower()[:8] in drawn_set and info2.get('vert_count') == body_vc and h2.lower()[:8] != dump_hash.lower()[:8]:
-                                alt = h2
-                                break
-                        if not alt:
-                            scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
-                            try:
-                                scan_dir = os.path.abspath(scan_dir) if scan_dir else ''
-                            except Exception:
-                                scan_dir = ''
-                            if scan_dir and os.path.isdir(scan_dir):
-                                for r2, _, fs2 in os.walk(scan_dir):
-                                    for fn2 in fs2:
-                                        if not fn2.lower().endswith('.buf'):
-                                            continue
-                                        m2 = _DUMP_FRAME_RE.match(fn2)
-                                        if m2:
-                                            hh = m2.group(2).lower()[:8]
-                                        elif os.path.basename(r2) == 'deduped':
-                                            hh = os.path.splitext(fn2)[0].lower()
-                                            if len(hh) != 8:
-                                                continue
-                                        else:
-                                            continue
-                                        if hh not in drawn_set:
-                                            continue
-                                        p2 = os.path.join(r2, fn2)
-                                        try:
-                                            vc2 = os.path.getsize(p2) // DUMP_STRIDE
-                                        except OSError:
-                                            continue
-                                        if vc2 == body_vc:
-                                            alt = hh
-                                            break
-                                    if alt:
-                                        break
-                        if alt:
-                            dump_hash = alt
-                    # IB分割キャラ: Position 置換 hash は pre-skin (SO) バッファ。
-                    # drawn hash (post-skin) を置換するとモデルローカル座標で
-                    # 上書きしてアニメ停止+体消滅する (実証済み)。BodyGate は
-                    # drawn のまま維持するため units には position_hash を別持つ。
-                    position_hash = dump_hash
-                    if _has_ib_split(_dump_cache.get('ib_splits') or {}):
-                        pv = find_position_vb(
-                            _dump_cache, vb0, vert_count, drawn_filter=False)
-                        if pv:
-                            position_hash = pv['vb_hash']
-                    pv_verts = [display_to_position_vb(tuple(v.co))
-                                for v in mesh.vertices]
-                # Bennett-mimic: overwrite only the position float3 of
-                # the real pre-skin vb0. normal/tangent stay from the
-                # dump; the game VS re-skins the new positions, so the
-                # body follows animations exactly.
-                with open(dump_path, 'rb') as f:
-                    dump_bytes = f.read()
-                pos_data = build_position_buf(dump_bytes, pv_verts)
-                with open(os.path.join(output_dir, f"{name}Position.buf"),
-                          'wb') as f:
-                    f.write(pos_data)
-                # IB match_first_index split — Draw可視 Body と同フレーム・同vs/psでペアになる IB のみに限定 (泛用)
-                ib_hash = None
-                ib_splits = None
-                try:
-                    splits_map = _dump_cache.get('ib_splits') or {}
-                    if splits_map and dump_hash:
-                        # Body の Draw可視 hash とペアになる IB のみに絞る
-                        scan_dir2 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
-                        try:
-                            scan_dir2 = os.path.abspath(scan_dir2) if scan_dir2 else ''
-                        except Exception:
-                            scan_dir2 = ''
-                        paired = _find_paired_ibs(scan_dir2, dump_hash) if scan_dir2 else set()
-                        # paired が空なら fallback で絞らず(過去キャラ互換)、あるなら絞る
-                        cand_map = {k: v for k, v in splits_map.items() if k in paired} if paired else splits_map
-                        best = None
-                        best_total = -1
-                        for kh, sp in cand_map.items():
-                            if len(sp) >= 2:
-                                tot = sum(c for _, c in sp)
-                                if tot > best_total:
-                                    best_total = tot
-                                    best = (kh, sp)
-                        if best:
-                            ib_hash, ib_splits = best
-                except Exception:
-                    pass
-                # IB ファイルを R32 で書き出し (INI の Resource と対応)
-                if ib_hash and ib_splits:
-                    dump_dir_for_ib = getattr(prefs, 'dump_dir', '')
-                    try:
-                        dump_dir_for_ib = bpy.path.abspath(dump_dir_for_ib) if dump_dir_for_ib else ''
-                    except Exception:
-                        pass
-                    ib_path = _find_ib_path(dump_dir_for_ib, ib_hash) if dump_dir_for_ib else ''
-                    if ib_path and os.path.exists(ib_path):
-                        try:
-                            with open(ib_path, 'rb') as f:
-                                ib_data = f.read()
-                            for idx2, (first2, cnt2) in enumerate(sorted(ib_splits)[:3]):
-                                part2 = ['Head', 'Body', 'Dress'][idx2]
-                                res_name2 = f"{char_name}{part2}"
-                                s = first2 * DUMP_INDEX_BYTES
-                                e = (first2 + cnt2) * DUMP_INDEX_BYTES
-                                sl = ib_data[s:e]
-                                if sl:
-                                    # R16 -> R32
-                                    n = len(sl) // DUMP_INDEX_BYTES
-                                    try:
-                                        indices = struct.unpack(f'<{n}H', sl)
-                                        sl = struct.pack(f'<{n}I', *indices)
-                                    except Exception:
-                                        pass
-                                    with open(os.path.join(output_dir, f"{res_name2}.ib"), 'wb') as outf:
-                                        outf.write(sl)
-                        except Exception:
-                            pass
-                    units.append({'name': name, 'vb_hash': dump_hash,
-                                  'position_hash': position_hash,
-                                  'vert_count': vert_count, 'role': 'BODY',
-                                  'ib': ib_hash, 'ib_splits': ib_splits})
-                else:
-                    units.append({'name': name, 'vb_hash': dump_hash,
-                                  'position_hash': position_hash,
-                                  'vert_count': vert_count, 'role': 'BODY'})
+                result = _export_body_unit(
+                    obj, mesh, name, vb0, vert_count, char_name,
+                    output_dir, props, prefs, self.report)
+                if result is None:
+                    return {'CANCELLED'}
+                body_unit, vert_count = result
+                units.append(body_unit)
                 primary_for_key[('BODY', vert_count)] = name
                 continue
             # CopyDispatch path (face units, COPY_DISPATCH mode, or fallback).
@@ -3802,73 +3880,11 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                     merged.append(h)
         # Bodyハッシュ優先ゲート (キャラ固有, 共有皮膚テクスチャ d4841e1a 等の波及を防ぐ)
         # units内 BODY の vb_hash (= position_vb hash, 例 Yanfei eb8b62d3) を $is トリガーに使用
-        # Drawフィルター: SO-only hash (bbdaf598) は除外し Draw可視 hash (e36be83b) を優先
-        # 無ければ faceDiffuse にフォールバック、どちらも無ければゲート無し
-        body_hash = next((u['vb_hash'] for u in units if u.get('role') == 'BODY'), None)
-        drawn_for_gate = _dump_cache.get('drawn_vb0') or set()
-        if body_hash and drawn_for_gate and body_hash.lower()[:8] not in drawn_for_gate:
-            body_vc = next((u['vert_count'] for u in units if u.get('role') == 'BODY'), None)
-            if body_vc:
-                # scan for a drawn vb0 with same vert_count (e.g. Mizuki e36be83b 22226)
-                alt = None
-                scan_dir = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
-                if scan_dir:
-                    try:
-                        scan_dir = os.path.abspath(scan_dir) if hasattr(scan_dir, 'lower') else str(scan_dir)
-                    except Exception:
-                        pass
-                    if os.path.isdir(scan_dir):
-                        for root2, _, files2 in os.walk(scan_dir):
-                            for fn2 in files2:
-                                if not fn2.lower().endswith('.buf'):
-                                    continue
-                                m2 = _DUMP_FRAME_RE.match(fn2)
-                                if m2:
-                                    hh = m2.group(2).lower()[:8]
-                                elif os.path.basename(root2) == 'deduped':
-                                    hh = os.path.splitext(fn2)[0].lower()
-                                    if not hh or len(hh) != 8:
-                                        continue
-                                else:
-                                    continue
-                                if hh not in drawn_for_gate:
-                                    continue
-                                p2 = os.path.join(root2, fn2)
-                                try:
-                                    vc2 = os.path.getsize(p2) // DUMP_STRIDE
-                                except OSError:
-                                    continue
-                                if vc2 == body_vc:
-                                    alt = hh
-                                    break
-                            if alt:
-                                break
-                if alt:
-                    body_hash = alt
-        face_diffuse_hash = None
-        if not body_hash:
-            face_vb_hashes = [u['vb_hash'] for u in units if u.get('role') != 'BODY']
-            face_diffuse_hash = _find_face_diffuse_hash(char_name, face_vb_hashes)
+        body_hash, face_diffuse_hash = _resolve_body_gate_hash(
+            units, _dump_cache, char_name, prefs)
         # IB split overrides — Draw可視 Body とペアになる IB のみに限定 (泛用、他小物は出さない)
-        ib_splits_for_ini = None
-        raw_splits = _dump_cache.get('ib_splits') or {}
-        if _has_ib_split(raw_splits) and body_hash:
-            scan_dir3 = char_dump_dir(char_name) or getattr(prefs, 'dump_dir', '')
-            try:
-                scan_dir3 = os.path.abspath(scan_dir3) if scan_dir3 else ''
-            except Exception:
-                scan_dir3 = ''
-            paired3 = _find_paired_ibs(scan_dir3, body_hash) if scan_dir3 else set()
-            if paired3:
-                filtered = {k: v for k, v in raw_splits.items() if k in paired3}
-                if filtered and any(len(v) >= 2 for v in filtered.values()):
-                    ib_splits_for_ini = filtered
-            else:
-                # fallback: when pairing fails (old dump without vs/ps), pass nothing to avoid 12重複爆殖
-                ib_splits_for_ini = None
-        elif _has_ib_split(raw_splits) and not body_hash:
-            # Body無しキャラでは外部IBは出さない(重複防止)
-            ib_splits_for_ini = None
+        ib_splits_for_ini = _resolve_ib_splits_for_ini(
+            _dump_cache, body_hash, char_name, prefs)
         with open(os.path.join(output_dir, f"{char_name}Head.hlsl"), 'w', newline='\n') as f:
             f.write(DIFF_HLSL)
         with open(os.path.join(output_dir, f"{char_name}.ini"), 'w', newline='\n') as f:

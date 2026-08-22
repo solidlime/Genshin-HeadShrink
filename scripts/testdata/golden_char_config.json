@@ -1,0 +1,27 @@
+{
+  "Noelle": {
+    "Dump_A": [
+      1.234568,
+      0.5,
+      -2.0
+    ],
+    "Dump_B": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "__config__": {
+      "shrink_scale": 0.65,
+      "shrink_falloff": 0.8,
+      "units": {
+        "def7af36": "BODY",
+        "63f702ce": "EYES"
+      },
+      "extra_hashes": {
+        "MOUTH": [
+          "d265427c"
+        ]
+      }
+    }
+  }
+}

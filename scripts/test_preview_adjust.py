@@ -2957,5 +2957,133 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
         self.assertIn('cs-t1 = copy ResourceNoelleMouthKey', ini)
 
 
+class GoldenMasterTest(unittest.TestCase):
+    """Phase 3 リファクタリング凍結用 golden master。
+
+    build_diff_ini / save_char_config / ExportDiff.execute の出力を
+    scripts/testdata/ の golden ファイルとバイト一致で比較する。
+    1バイトでも変わったらリファクタリングが挙動を壊している (BLOCK)。
+    """
+
+    GOLDEN_DIR = os.path.join(SCRIPT_DIR, 'testdata')
+
+    def _assert_bytes_equal(self, actual, golden_name):
+        with open(os.path.join(self.GOLDEN_DIR, golden_name), 'rb') as f:
+            golden = f.read()
+        self.assertEqual(actual, golden,
+                         f'{golden_name} mismatch (byte-exact required)')
+
+    def test_build_diff_ini_vb_replace_golden(self):
+        units = [
+            {'name': 'NoelleBody', 'vb_hash': 'e36be83b',
+             'position_hash': 'bbdaf598', 'vert_count': 15965, 'role': 'BODY'},
+            {'name': 'NoelleBody_1066a76c', 'vb_hash': '1066a76c',
+             'position_hash': '28247abc', 'vert_count': 85527, 'role': 'BODY',
+             'ib': '911ff708', 'ib_splits': [(0, 41385), (41385, 44142)]},
+            {'name': 'NoelleEyes', 'vb_hash': '63f702ce',
+             'vert_count': 1083, 'role': 'EYES'},
+            {'name': 'NoelleMouth', 'vb_hash': '6192fe1c',
+             'vert_count': 877, 'role': 'MOUTH'},
+            {'name': 'NoelleUnit99998888', 'vb_hash': '99998888',
+             'vert_count': 500},
+        ]
+        extra = {'EYES': ['aaaa1111'], 'OTHER': ['bbbb2222']}
+        ini = hs.build_diff_ini(
+            'Noelle', units, 'VB_REPLACE', extra, None, None, 'eb8b62d3',
+            {'911ff708': [(0, 100), (100, 200), (200, 300)]})
+        self._assert_bytes_equal(ini.encode('utf-8'),
+                                 'golden_vb_replace.ini')
+
+    def test_build_diff_ini_copy_dispatch_golden(self):
+        units = [
+            {'name': 'MonaBody', 'vb_hash': 'def7af36',
+             'vert_count': 15965, 'role': 'BODY'},
+            {'name': 'MonaEyes', 'vb_hash': '63f702ce',
+             'vert_count': 1083, 'role': 'EYES'},
+        ]
+        ini = hs.build_diff_ini('Mona', units, 'COPY_DISPATCH',
+                                {'EYES': ['cccc3333']}, 'd4841e1a')
+        self._assert_bytes_equal(ini.encode('utf-8'),
+                                 'golden_copy_dispatch.ini')
+
+    def test_save_char_config_json_golden(self):
+        path = os.path.join(tempfile.mkdtemp(), 'face_offsets.json')
+        hs.save_char_config(path, 'Noelle',
+                            {'Dump_A': [1.23456789, 0.5, -2.0],
+                             'Dump_B': [0.0, 0.0, 0.0]},
+                            {'shrink_scale': 0.65, 'shrink_falloff': 0.8,
+                             'units': {'def7af36': 'BODY', '63f702ce': 'EYES'},
+                             'extra_hashes': {'MOUTH': ['d265427c']}})
+        with open(path, 'rb') as f:
+            self._assert_bytes_equal(f.read(), 'golden_char_config.json')
+
+    def test_export_diff_files_golden(self):
+        tmp = tempfile.mkdtemp()
+
+        class _Attr:
+            def __init__(self, n):
+                self._flat = [0.0] * (n * 3)
+                self.data = types.SimpleNamespace(
+                    foreach_get=lambda name, dest, _f=self._flat:
+                        dest.__setitem__(slice(None), _f))
+
+        class _Mesh:
+            def __init__(self, n):
+                self.vertices = [types.SimpleNamespace(co=(0.0, 0.0, 0.0))] * n
+                self._attr = _Attr(n)
+
+            @property
+            def attributes(self):
+                return self
+
+            def get(self, name):
+                return self._attr if name == 'hs_original_pos' else None
+
+        class _Obj:
+            def __init__(self, name, vb0, n):
+                self.type = 'MESH'
+                self.name = name
+                self.data = _Mesh(n)
+                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'MOUTH'}
+
+            def get(self, key, default=None):
+                return self._props.get(key, default)
+
+            def __getitem__(self, key):
+                return self._props[key]
+
+        coll = types.SimpleNamespace(
+            objects=[_Obj('Mouth1', '6192fe1c', 100),
+                     _Obj('Mouth2', 'd265427c', 100)])
+        hs.bpy.data.collections = types.SimpleNamespace(
+            get=lambda name: coll if name == 'HS_Preview' else None)
+        saved = (hs.bpy.path.abspath, hs._clean_export_dir,
+                 hs._find_face_diffuse_hash, hs.auto_extra_hashes)
+        hs.bpy.path.abspath = lambda p: p
+        hs._clean_export_dir = lambda *a, **k: 0
+        # 周辺アセットの有無に依存しないよう自動検出を固定
+        hs._find_face_diffuse_hash = lambda *a: None
+        hs.auto_extra_hashes = lambda *a, **k: {}
+        try:
+            context = types.SimpleNamespace(
+                scene=types.SimpleNamespace(headshrink_props=types.SimpleNamespace(
+                    char_name='Noelle', position_vs=hs.DEFAULT_POSITION_VS)),
+                preferences=types.SimpleNamespace(addons={
+                    hs.__name__: types.SimpleNamespace(
+                        preferences=types.SimpleNamespace(output_dir=tmp))}))
+            op = types.SimpleNamespace(report=lambda level, msg: None)
+            result = hs.NHS_OT_ExportDiff.execute(op, context)
+        finally:
+            (hs.bpy.path.abspath, hs._clean_export_dir,
+             hs._find_face_diffuse_hash, hs.auto_extra_hashes) = saved
+        self.assertEqual(result, {'FINISHED'})
+        out_dir = os.path.join(tmp, 'Noelle')
+        for fn in ('Noelle.ini', 'NoelleHead.hlsl',
+                   'NoelleMouthBase.buf', 'NoelleMouthKey.buf'):
+            with open(os.path.join(out_dir, fn), 'rb') as f:
+                self._assert_bytes_equal(f.read(),
+                                         os.path.join('golden_export', fn))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
