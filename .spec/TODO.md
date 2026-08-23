@@ -1,7 +1,7 @@
 # TODO - タスクリスト
 
 ## 優先度：高
-- [x] **T020: スタンドアロン顔override生成の廃止** — 2026-08-23 完了 (commit e7b8644、pytest 274 passed / 1 skipped。実機検証済み、詳細は SPEC「T020」節)
+- [x] **T020: スタンドアロン顔override生成の廃止** — 2026-08-23 完了 (commit e7b8644) → **同日差し戻し (commit 41bc339, git revert)**。実機検証で顔パーツ縮小が失われることを確認 (頭部統合メッシュのみ縮小で目/口/眉は原寸のまま破綻)。顔overrideは必須機能と判明 → T019 状態へ復帰。同時表示汚染は既知制約として受入 (緩和策: 同体型キャラ間で scale/offset 統一)。詳細は SPEC「T020」節
   - [x] a: FACE UI ロール (EYES/MOUTH/BROW + variant) の ini セクション生成廃止 (ExportDiff ループ冒頭で continue。TextureOverride/CommandList/Resource/CustomShader 全て停止)
   - [x] b: 関連 buf 出力停止 + テスト/golden 更新 (FaceOverrideDroppedTest 新設、golden シナリオは role OTHER 化)
   - [ ] c: 全キャラ再エクスポート (ユーザー作業。Sucrose は手動編集済み ini と同等状態になる)
