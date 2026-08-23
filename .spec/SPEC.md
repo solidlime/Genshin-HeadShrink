@@ -258,6 +258,15 @@
 3. [Present] のリセットを \post \ = 0\ → \ = 0\ (pre) に変更 — 描画前に落とす方が厳密 (3DMigoto ソース調査済み: pre=Present前=フレーム末尾, post=翌フレーム先頭)
 4. 既知制約は維持: 両キャラ mod 同時インストール時の共有顔パーツはini名アルファベット順の先勝ち
 
+## T020: スタンドアロン顔override生成の廃止 (2026-08-23, 実機検証済み)
+
+**背景**: 複数キャラ同時表示時の汚染は、スタンドアロン顔override (共有VBハッシュ上の copy→CS→swap) が唯一の経路だった。スクロース自身の縮小は統合メッシュ経路 (Position b655c335 差替 + IB 06e86a68 再描画 + Head/Body ib 分割、すべてキャラ固有リソース) で完結しており、UI画面でも統合メッシュは必ず描かれる (ダンプ FrameAnalysis-2026-08-23-103733 で実証、ゲーム再起動後もユーザー実機確認済み)。
+
+**決定 (ユーザー承認)**: FACE UI ロール (EYES/MOUTH/BROW + variant) の ini セクション生成を廃止する。
+- 廃止対象: 顔 TextureOverride / CommandList / Resource(Dif/Base/Key) / CustomShader / 対応 buf 出力
+- 温存: 統合メッシュ経路 (BODY Position / IB / Head / Body)、OTHER ロール、$is 機構 (消費者不在だが現行維持・将来整理)
+- 効果: 縮小維持 × クロスキャラ汚染ゼロ。face_offset プロパティはプレビュー専用になる (ゲーム内反映経路なし)
+
 ## リファクタリング仕様 (2026-08-22, #081 アーキテクチャ判断済み)
 
 ### 方針
