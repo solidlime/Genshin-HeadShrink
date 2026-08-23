@@ -1,6 +1,10 @@
 # TODO - タスクリスト
 
 ## 優先度：高
+- [x] **T019: クロスキャラ汚染修正 — ゲートをキャラ固有ハッシュに限定** — 2026-08-23 完了 (commit 40e5964、pytest 274 passed / 1 skipped。詳細は SPEC「T019」節)
+  - [x] a: IB セクション生成から `$is = 1` を削除 (セクション自体は残置)、[Present] を `post $is = 0` → `$is = 0` (pre) に変更
+  - [x] b: テスト更新 (IB セクションに $is を含まないこと / Present 行が pre 形式) + golden 更新 (golden_vb_replace.ini / golden_copy_dispatch.ini / golden_export/Noelle.ini)
+  - [ ] c: 全キャラ mod 再エクスポート (ユーザー作業)
 - [x] **T018: face offset 復活 — キャラ毎 Key への配置移動再導入** — 2026-08-23 完了 (commit b110514、#081 REVIEW PASS、pytest 274 passed / 1 skipped。詳細は SPEC「T018」節)
   - [x] a: `_face_key_verts` に offset 引数追加 (デフォルト (0,0,0))、呼び出し側で role→prop 解決 + `display_to_game(offset)` 変換
   - [x] b: offset 反映テスト追加 (`test_key_offset_translation`) + 既存テスト無変更通過確認 + pytest 全 green
