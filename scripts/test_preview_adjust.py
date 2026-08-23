@@ -2884,7 +2884,7 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
                 self.type = 'MESH'
                 self.name = name
                 self.data = _Mesh(n)
-                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'OTHER'}
+                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'MOUTH'}
 
             def get(self, key, default=None):
                 return self._props.get(key, default)
@@ -2916,20 +2916,19 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
         self.assertEqual(result, {'FINISHED'})
         out_dir = os.path.join(tmp, 'Noelle')
         # 冗長排除: primary の Base/Key のみ生成、2個目の別Base/Keyは作らない (extra共有)
-        for fn in ('NoelleUnit6192fe1cBase.buf',
-                    'NoelleUnit6192fe1cKey.buf'):
+        for fn in ('NoelleMouthBase.buf', 'NoelleMouthKey.buf'):
             self.assertTrue(os.path.exists(os.path.join(out_dir, fn)),
                             f'missing {fn}')
-        for fn in ('NoelleUnit6192fe1c_d265427cBase.buf',
-                    'NoelleUnit6192fe1c_d265427cKey.buf'):
+        for fn in ('NoelleMouth_d265427cBase.buf',
+                   'NoelleMouth_d265427cKey.buf'):
             self.assertFalse(os.path.exists(os.path.join(out_dir, fn)),
                              f'should not exist (extra shares primary) {fn}')
         # ini の TextureOverride は primary + extra の2つ (extraは同 role の別hashとして出力)
         # + FaceDiffuseゲートが自動検出された場合は +1
         ini = open(os.path.join(out_dir, 'Noelle.ini'),
                    encoding='utf-8').read()
-        self.assertEqual(ini.count('[TextureOverrideNoelleUnit6192fe1c]'), 1)
-        self.assertEqual(ini.count('[TextureOverrideNoelleUnit6192fe1c_d265427c]'), 1)
+        self.assertEqual(ini.count('[TextureOverrideNoelleMouth]'), 1)
+        self.assertEqual(ini.count('[TextureOverrideNoelleMouth_d265427c]'), 1)
         # FaceDiffuse gate があれば 3、無ければ 2
         tc = ini.count('[TextureOverride')
         self.assertIn(tc, (2, 3))
@@ -2937,8 +2936,8 @@ class ExportDiffDuplicateUnitNameTest(unittest.TestCase):
             self.assertIn('[TextureOverrideFaceDiffuse]', ini)
             self.assertIn('if $is', ini)
         # extra は primary の Base/Key を参照 (cs-t0/cs-t1 が primary Resource)
-        self.assertIn('cs-t0 = copy ResourceNoelleUnit6192fe1cBase', ini)
-        self.assertIn('cs-t1 = copy ResourceNoelleUnit6192fe1cKey', ini)
+        self.assertIn('cs-t0 = copy ResourceNoelleMouthBase', ini)
+        self.assertIn('cs-t1 = copy ResourceNoelleMouthKey', ini)
 
 
 class GoldenMasterTest(unittest.TestCase):
@@ -3028,7 +3027,7 @@ class GoldenMasterTest(unittest.TestCase):
                 self.type = 'MESH'
                 self.name = name
                 self.data = _Mesh(n)
-                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'OTHER'}
+                self._props = {'hs_vb0_hash': vb0, 'hs_role': 'MOUTH'}
 
             def get(self, key, default=None):
                 return self._props.get(key, default)
@@ -3073,8 +3072,7 @@ class GoldenMasterTest(unittest.TestCase):
         self.assertEqual(result, {'FINISHED'})
         out_dir = os.path.join(tmp, 'Noelle')
         for fn in ('Noelle.ini', 'NoelleHead.hlsl',
-                   'NoelleUnit6192fe1cBase.buf',
-                   'NoelleUnit6192fe1cKey.buf'):
+                   'NoelleMouthBase.buf', 'NoelleMouthKey.buf'):
             with open(os.path.join(out_dir, fn), 'rb') as f:
                 self._assert_bytes_equal(f.read(),
                                          os.path.join('golden_export', fn))

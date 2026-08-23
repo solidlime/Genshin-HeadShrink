@@ -1,10 +1,10 @@
-"""T015〜T020: 顔 Key 正規化・IB ゲート・スタンドアロン顔override廃止のテスト。
+"""T015: 共有顔ハッシュ Key 正規化 + IB ゲートのテスト。
 
-- _face_key_verts の数学 (純スケール + offset、T018)。T020 で export 経路は
-  廃止されたが純関数は資産として残置。
+- 顔 UI ユニット (EYES/MOUTH/BROW) の Key は f(Base, scale) の純スケール
+  (配置移動なし)。プレビュー配置が変わっても Key.buf バイト不変。
 - IB ハッシュセクション (handling=skip) は $is を立てない (T019:
   キャラ間共有ハッシュでの cross-char 汚染防止)。
-- T020: 顔 UI ロールのセクション/buf は生成されない。BODY/OTHER は従来通り。
+- 本体 (BODY) / 非顔ユニットは従来通り配置移動が反映される (回帰ガード)。
 
 Run: python -m pytest scripts/test_t015_face_key.py -q
 """
@@ -126,40 +126,63 @@ def _positions(buf, n, stride=hs.DUMP_STRIDE):
 
 
 class FaceKeyNormalizationTest(unittest.TestCase):
-    """T015/T018: _face_key_verts の数学 (純関数テスト)。
+    """T015(a): 顔 UI ユニットの Key = f(Base, scale) 純スケール。"""
 
-    T020 でスタンドアロン顔override生成は廃止されたが、純関数は資産として
-    残置するため直接検証する。
-    """
+    def test_key_translation_invariant(self):
+        # 配置 (preview の v.co オフセット) が変わっても Key/Base はバイト不変
+        base = _base_verts(8)
+        run_a = _run_export([_Obj(
+            'Mouth1', '6192fe1c', 'MOUTH',
+            _Mesh(base, [(x + 10.0, y + 5.0, z - 3.0) for x, y, z in base]))])
+        run_b = _run_export([_Obj(
+            'Mouth1', '6192fe1c', 'MOUTH',
+            _Mesh(base, [(x - 7.5, y + 1.25, z + 9.0) for x, y, z in base]))])
+        for fn in ('NoelleMouthKey.buf', 'NoelleMouthBase.buf'):
+            self.assertEqual(_read(os.path.join(run_a, fn)),
+                             _read(os.path.join(run_b, fn)), fn)
 
     def test_key_is_pure_scale_of_base(self):
-        base = [hs.display_to_game(v) for v in _base_verts(6)]
-        key = hs._face_key_verts(base, 0.5, 'UNIFORM', (0.95, 0.95, 0.95))
-        mins = [min(v[i] for v in base) for i in range(3)]
-        maxs = [max(v[i] for v in base) for i in range(3)]
-        c = [(mins[i] + maxs[i]) / 2.0 for i in range(3)]
-        for got, b in zip(key, base):
-            for i in range(3):
-                self.assertAlmostEqual(got[i], c[i] + (b[i] - c[i]) * 0.5,
-                                       places=6)
+        base = _base_verts(6)
+        out = _run_export([_Obj(
+            'Eyes1', '63f702ce', 'EYES',
+            _Mesh(base, [(x + 4.0, y, z) for x, y, z in base]))], scale=0.5)
+        base_buf = _read(os.path.join(out, 'NoelleEyesBase.buf'))
+        key_buf = _read(os.path.join(out, 'NoelleEyesKey.buf'))
+        self.assertNotEqual(base_buf, key_buf)
+        expected = hs.replace_positions(
+            base_buf,
+            hs._face_key_verts([hs.display_to_game(v) for v in base],
+                               0.5, 'UNIFORM', (0.95, 0.95, 0.95)),
+            hs.DUMP_STRIDE)
+        self.assertEqual(key_buf, expected)
 
     def test_key_scale_one_identity(self):
-        # scale=1.0 なら Key == Base (変形なし)
-        base = [hs.display_to_game(v) for v in _base_verts(5)]
-        key = hs._face_key_verts(base, 1.0, 'UNIFORM', (0.95, 0.95, 0.95))
-        for got, b in zip(key, base):
-            for i in range(3):
-                self.assertAlmostEqual(got[i], b[i], places=6)
+        # scale=1.0 なら Key == Base (変形なし)。符号ゼロ (-0.0 vs 0.0) は
+        # 数値的に同一なので float 比較する
+        base = _base_verts(5)
+        out = _run_export([_Obj(
+            'Brow1', 'ddf54429', 'BROW',
+            _Mesh(base, [(x + 3.0, y, z) for x, y, z in base]))], scale=1.0)
+        key = _positions(_read(os.path.join(out, 'NoelleBrowKey.buf')), 5)
+        base_p = _positions(_read(os.path.join(out, 'NoelleBrowBase.buf')), 5)
+        self.assertEqual(key, base_p)
 
     def test_key_offset_translation(self):
-        # T018: offset はスケール後に加算される (呼び出し側で game 空間に
-        # 変換済みのこと)。scale=1.0 + offset なら Key = Base + offset
-        base = [hs.display_to_game(v) for v in _base_verts(6)]
+        # T018: face_offset (display 空間) は game 空間へ変換されて Key に
+        # 加算される。scale=1.0 + offset なら Key = Base + display_to_game(off)
+        base = _base_verts(6)
         off = (1.5, -2.0, 3.0)
-        key = hs._face_key_verts(base, 1.0, 'UNIFORM', (0.95,) * 3, off)
+        out = _run_export(
+            [_Obj('Mouth1', '6192fe1c', 'MOUTH',
+                  _Mesh(base, [(x + 4.0, y, z) for x, y, z in base]))],
+            scale=1.0,
+            face_offsets={'face_offset_mouth': off})
+        key = _positions(_read(os.path.join(out, 'NoelleMouthKey.buf')), 6)
+        off_game = hs.display_to_game(off)
         for got, b in zip(key, base):
+            bg = hs.display_to_game(b)
             for i in range(3):
-                self.assertAlmostEqual(got[i], b[i] + off[i], places=6)
+                self.assertAlmostEqual(got[i], bg[i] + off_game[i], places=5)
 
     def test_ini_ib_sections_emit_is_gate(self):
         # T019: IB ハッシュセクション (handling=skip) は $is を立てない
@@ -186,39 +209,6 @@ class FaceKeyNormalizationTest(unittest.TestCase):
         fb = '\n'.join(fallback)
         self.assertIn('handling = skip', fb)
         self.assertNotIn('$is = 1', fb)
-
-
-class FaceOverrideDroppedTest(unittest.TestCase):
-    """T020: スタンドアロン顔override生成の廃止。
-
-    顔 UI ロール (EYES/MOUTH/BROW) のセクション・buf は生成されず、
-    統合メッシュ経路 (BODY/OTHER) は従来通り生成される。
-    """
-
-    def test_face_units_not_exported(self):
-        base = _base_verts(4)
-        objs = [
-            _Obj('Mouth1', '6192fe1c', 'MOUTH', _Mesh(base, base)),
-            _Obj('Eyes1', '63f702ce', 'EYES', _Mesh(base, base)),
-            _Obj('Brow1', 'ddf54429', 'BROW', _Mesh(base, base)),
-            _Obj('Other1', '99998888', 'OTHER', _Mesh(base, base)),
-        ]
-        out = _run_export(objs)
-        for fn in ('NoelleMouthBase.buf', 'NoelleMouthKey.buf',
-                   'NoelleEyesBase.buf', 'NoelleEyesKey.buf',
-                   'NoelleBrowBase.buf', 'NoelleBrowKey.buf'):
-            self.assertFalse(os.path.exists(os.path.join(out, fn)), fn)
-        ini = open(os.path.join(out, 'Noelle.ini'), encoding='utf-8').read()
-        for needle in ('[TextureOverrideNoelleMouth',
-                       '[TextureOverrideNoelleEyes',
-                       '[TextureOverrideNoelleBrow',
-                       'CommandListNoelleMouth',
-                       'ResourceNoelleMouthBase'):
-            self.assertNotIn(needle, ini)
-        # 統合メッシュ経路 (OTHER) は生成され続ける
-        self.assertTrue(os.path.exists(
-            os.path.join(out, 'NoelleUnit99998888Key.buf')))
-        self.assertIn('[TextureOverrideNoelleUnit99998888]', ini)
 
 
 class NonFaceUnitRegressionTest(unittest.TestCase):

@@ -3908,14 +3908,6 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
                 return {'CANCELLED'}
             vert_count = len(mesh.vertices)
             role = obj.get('hs_role', 'OTHER')
-            # T020: スタンドアロン顔override廃止。共有VBハッシュ上の
-            # copy→CS→swap が複数キャラ同時表示時の cross-char 汚染の唯一
-            # 経路だったため、顔 UI ロール (EYES/MOUTH/BROW) のセクション・
-            # buf 出力を停止する。縮小は統合メッシュ経路 (Position差替 +
-            # IB再描画) のみで完結する。variant (extra_hash) も units に
-            # 入らないため自動生成されない。
-            if role in _FACE_UI_ROLES:
-                continue
             # 7a73d3b5 冗長排除: 同一 (role, vert_count) の2個目以降は extra へ
             if _reclassify_dup_as_extra(role, vb0, vert_count,
                                         primary_for_key, extra_hashes, units):
@@ -3950,16 +3942,30 @@ class NHS_OT_ExportDiff(bpy.types.Operator):
             base_verts = [display_to_game(tuple(flat[i:i + 3]))
                           for i in range(0, len(flat), 3)]
             base_data = replace_positions(bytes(vert_count * DUMP_STRIDE), base_verts, DUMP_STRIDE)
-            key = (role, vert_count)
-            if key not in delta_cache:
-                delta_cache[key] = [(v[0] - b[0], v[1] - b[1], v[2] - b[2])
-                                    for b, v in zip(base_verts, verts)]
-            # セカンダリ (同一 role/vert_count の2個目以降) はプライマリの
-            # delta を base に加算して key を再現する。verts は配置差で
-            # ズレた preview 結果なので使わない。
-            delta = delta_cache[key]
-            key_verts = [(b[0] + d[0], b[1] + d[1], b[2] + d[2])
-                         for b, d in zip(base_verts, delta)]
+            if role in _FACE_UI_ROLES:
+                # T015: 共有顔ハッシュの Key は f(Base, scale) の純スケール。
+                # T018: face_offset (display 空間プロップ) を game 空間へ
+                # 変換して Key に加算 (preview の _apply_face_offset と同じ
+                # 変位)。variant (extra_hash) は Base/Key を共有するため
+                # 自動的に同じ正規化が適用される。
+                off = _face_offset_for_role(props, role)
+                off_game = (display_to_game(tuple(off)) if off
+                            else (0.0, 0.0, 0.0))
+                key_verts = _face_key_verts(
+                    base_verts, props.shrink_scale,
+                    props.shrink_scale_mode, tuple(props.shrink_scale_xyz),
+                    off_game)
+            else:
+                key = (role, vert_count)
+                if key not in delta_cache:
+                    delta_cache[key] = [(v[0] - b[0], v[1] - b[1], v[2] - b[2])
+                                        for b, v in zip(base_verts, verts)]
+                # セカンダリ (同一 role/vert_count の2個目以降) はプライマリの
+                # delta を base に加算して key を再現する。verts は配置差で
+                # ズレた preview 結果なので使わない。
+                delta = delta_cache[key]
+                key_verts = [(b[0] + d[0], b[1] + d[1], b[2] + d[2])
+                             for b, d in zip(base_verts, delta)]
             key_data = replace_positions(base_data, key_verts, DUMP_STRIDE)
             with open(os.path.join(output_dir, f"{name}Base.buf"), 'wb') as f:
                 f.write(base_data)
