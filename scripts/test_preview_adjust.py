@@ -484,7 +484,7 @@ class BuildDiffIniTest(unittest.TestCase):
         ])
         for needle in [
             '[Constants]', 'global $is = 0',
-            '[Present]', 'post $is = 0',
+            '[Present]', '$is = 0',
             '[TextureOverrideNoelleHead]', 'hash = def7af36', '$is = 1',
             'run = CommandListNoelleHead',
             '[CommandListNoelleHead]',

@@ -965,9 +965,8 @@ def _ini_vb_replace_body(char, u):
             f"[TextureOverride{char}IB]",
             f"hash = {ib_hash}",
             "handling = skip",
-            # T015: 毎ドロー発火で $is を立てる (BodyGate はリソース再バインド
-            # 時しか発火しないためゲート間欠 → 点滅の根因)。
-            "$is = 1",
+            # T019: ここで $is=1 を立てない (IB ハッシュはキャラ間共有のため
+            # cross-char 汚染の根因)。$is レイザーは BodyGate/Position のみ。
             "drawindexed = auto",
             "",
         ]
@@ -1101,8 +1100,9 @@ def _ini_ib_split_overrides(char, ib_splits, done):
             f"[TextureOverride{char}IB]",
             f"hash = {key}",
             "handling = skip",
-            # T015: 毎ドロー発火で $is を立てる (ゲート確実化)。
-            "$is = 1",
+            # T019: ここで $is=1 を立てない (IB ハッシュはキャラ間共有のため、
+            # 他キャラ表示中に gate が立ち共有顔ハッシュへ cross-char 適用
+            # される汚染の根因)。$is レイザーは BodyGate/Position のみ。
             "drawindexed = auto",
             "",
         ]
@@ -1144,7 +1144,9 @@ def build_diff_ini(char, units, mode='VB_REPLACE', extra_hashes=None, vb_ps_t0=N
     body_hash優先で、body無し時のみ旧 [TextureOverrideFaceDiffuse] として使用。
     """
     # effieface式: $is を global/post で初期化 (BodyGate専用)
-    parts = ["[Constants]", "global $is = 0", "", "[Present]", "post $is = 0", ""]
+    # T019: [Present] は pre 形式 (接頭辞なし) — 描画前に $is を落とすのが厳密。
+    # post だと次フレームの先頭 draw まで $is が残る。
+    parts = ["[Constants]", "global $is = 0", "", "[Present]", "$is = 0", ""]
     # body優先、無ければ faceDiffuseフォールバック (body_hashは ExportDiffが units内BODYから供給)
     gate_hash, gate_name = _ini_gate(body_hash, face_diffuse_hash, vb_ps_t0)
     if gate_hash:

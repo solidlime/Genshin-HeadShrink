@@ -2,7 +2,8 @@
 
 - 顔 UI ユニット (EYES/MOUTH/BROW) の Key は f(Base, scale) の純スケール
   (配置移動なし)。プレビュー配置が変わっても Key.buf バイト不変。
-- IB ハッシュセクション (handling=skip) に $is = 1 を含む。
+- IB ハッシュセクション (handling=skip) は $is を立てない (T019:
+  キャラ間共有ハッシュでの cross-char 汚染防止)。
 - 本体 (BODY) / 非顔ユニットは従来通り配置移動が反映される (回帰ガード)。
 
 Run: python -m pytest scripts/test_t015_face_key.py -q
@@ -184,8 +185,9 @@ class FaceKeyNormalizationTest(unittest.TestCase):
                 self.assertAlmostEqual(got[i], bg[i] + off_game[i], places=5)
 
     def test_ini_ib_sections_emit_is_gate(self):
-        # T015(b): IB ハッシュセクション (handling=skip) は毎ドロー発火の
-        # $is = 1 を持つ。BodyGate セクションも残置 (フォールバック)。
+        # T019: IB ハッシュセクション (handling=skip) は $is を立てない
+        # (IB ハッシュはキャラ間共有 → cross-char 汚染の根因)。
+        # BodyGate セクションは残置 (フォールバック)。
         units = [
             {'name': 'NoelleBody', 'vb_hash': 'e36be83b',
              'position_hash': 'bbdaf598', 'vert_count': 100, 'role': 'BODY',
@@ -199,12 +201,14 @@ class FaceKeyNormalizationTest(unittest.TestCase):
         ib_block = ini.split('[TextureOverrideNoelleIB]', 1)[1]
         ib_block = ib_block.split('[TextureOverride', 1)[0]
         self.assertIn('handling = skip', ib_block)
-        self.assertIn('$is = 1', ib_block)
+        self.assertNotIn('$is = 1', ib_block)
         self.assertIn('[TextureOverrideBodyGate]', ini)
         # fallback パス (_ini_ib_split_overrides) も同様
         fallback = hs._ini_ib_split_overrides(
             'Noelle', {'911ff708': [(0, 10), (10, 5)]}, set())
-        self.assertIn('$is = 1', '\n'.join(fallback))
+        fb = '\n'.join(fallback)
+        self.assertIn('handling = skip', fb)
+        self.assertNotIn('$is = 1', fb)
 
 
 class NonFaceUnitRegressionTest(unittest.TestCase):
